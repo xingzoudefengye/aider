@@ -479,6 +479,27 @@ class TestRepo(unittest.TestCase):
         # Assert that coder.get_tracked_files() returns the three filenames
         self.assertEqual(set(tracked_files), set(created_files))
 
+    def test_get_tracked_files_after_external_repack(self):
+        with GitTemporaryDirectory():
+            raw_repo = git.Repo()
+            Path("old.txt").write_text("old", encoding="utf-8")
+            raw_repo.git.add("old.txt")
+            raw_repo.git.commit("-m", "initial")
+            raw_repo.git.repack("-a")
+            raw_repo.git.prune_packed()
+            git_repo = GitRepo(InputOutput(), None, None)
+            self.assertIn("old.txt", git_repo.get_tracked_files())
+
+            Path("new.txt").write_text("new", encoding="utf-8")
+            raw_repo.git.add("new.txt")
+            raw_repo.git.commit("-m", "external commit")
+            # 保留旧 pack，只将新对象放进新 pack，复现长驻客户端的旧缓存。
+            raw_repo.git.repack("-a")
+            raw_repo.git.prune_packed()
+            with self.assertRaises(git.exc.ODBError):
+                _ = git_repo.repo.head.commit
+            self.assertEqual(set(git_repo.get_tracked_files()), {"old.txt", "new.txt"})
+
     def test_get_tracked_files_with_new_staged_file(self):
         with GitTemporaryDirectory():
             # new repo

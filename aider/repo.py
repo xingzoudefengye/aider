@@ -435,7 +435,12 @@ class GitRepo:
             return []
 
         try:
-            commit = self.repo.head.commit
+            try:
+                commit = self.repo.head.commit
+            except git.exc.ODBError:
+                # 外部提交或打包后，长驻 CLI 的对象数据库可能仍缓存旧 pack 列表。
+                self.repo.odb.update_cache(force=True)
+                commit = self.repo.head.commit
         except ValueError:
             commit = None
         except ANY_GIT_ERROR as err:
