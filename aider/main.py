@@ -1062,6 +1062,8 @@ def main(argv=None, input=None, output=None, force_git_root=None, return_coder=F
         ClipboardWatcher(coder.io, verbose=args.verbose)
 
     coder.show_announcements()
+    if args.restore_chat_history:
+        coder.io.show_chat_history(coder.restored_messages)
 
     if args.show_prompts:
         coder.cur_messages += [

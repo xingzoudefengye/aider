@@ -306,9 +306,17 @@ class WebStore:
             # 保留原历史和索引，删除一条不会让其他会话的标题、归档状态错位。
             if info.get("deleted"):
                 continue
+            updated_at = modified
+            continued = self.root / ".aider.session-history" / f"{index}.md"
+            if continued.is_file():
+                continued_text = continued.read_text(encoding="utf-8", errors="replace").strip()
+                # 续聊追加在导出文件中，Web 详情也需读取同一份历史。
+                if continued_text.startswith(lines[start]):
+                    content = continued_text
+                    updated_at = datetime.fromtimestamp(continued.stat().st_mtime, timezone.utc).isoformat()
             sessions.append({"id": str(index), "title": info.get("title") or self._generate_session_title(content),
                              "started_at": lines[start].removeprefix("# aider chat started at "),
-                             "updated_at": modified, "project": str(self.root),
+                             "updated_at": updated_at, "project": str(self.root),
                              "archived": bool(info.get("archived")), "content": content})
         return list(reversed(sessions))
 
@@ -374,7 +382,8 @@ class WebStore:
             # 单独导出所选会话，恢复时不混入同项目的其他会话。
             path = self.root / ".aider.session-history" / f"{session['id']}.md"
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(session["content"] + "\n", encoding="utf-8")
+            if not path.exists():
+                path.write_text(session["content"] + "\n", encoding="utf-8")
             return {"command": session["restore_command"]}
 
 

@@ -1066,6 +1066,20 @@ class InputOutput:
         mdStream = MarkdownStream(mdargs=mdargs, console=self.console, theme_mode=self.theme_mode)
         return mdStream
 
+    def show_chat_history(self, messages):
+        """历史回放只渲染，不再次写入聊天记录。"""
+        if not messages:
+            return
+        self.console.print(Text(f"历史对话 · {len(messages)} 条消息"))
+        for message in messages:
+            role, content = message.get("role"), message.get("content", "")
+            if role == "user":
+                self.console.print(Text("用户"), style=self.user_input_color)
+                self.display_user_input(content)
+            elif role == "assistant":
+                self.console.print(Text("助手"), style=self.assistant_output_color)
+                self.assistant_output(content)
+        self.console.print(Text("── 历史对话结束，继续输入即可 ──"))
 
     def assistant_output(self, message, pretty=None):
         if not message:

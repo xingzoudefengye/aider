@@ -541,10 +541,13 @@ class Coder:
         self.summarized_done_messages = []
         self.summarizing_messages = None
 
+        self.restored_messages = []
         if not self.done_messages and restore_chat_history:
             history_md = self.io.read_text(self.io.chat_history_file)
             if history_md:
                 self.done_messages = utils.split_chat_history_markdown(history_md)
+                # 展示完整历史快照，不受后台上下文摘要影响。
+                self.restored_messages = list(self.done_messages)
                 self.summarize_start()
 
         # Linting and testing
