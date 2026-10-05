@@ -15,7 +15,7 @@ from pathlib import Path
 from prompt_toolkit.completion import Completer, Completion, ThreadedCompleter
 from prompt_toolkit.cursor_shapes import ModalCursorShapeConfig
 from prompt_toolkit.enums import EditingMode
-from prompt_toolkit.filters import Condition, is_searching
+from prompt_toolkit.filters import Condition, is_done, is_searching
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.key_binding.vi_state import InputMode
@@ -150,7 +150,10 @@ class AutoCompleter(Completer):
             partial = words[0].lower()
             candidates = [cmd for cmd in self.command_names if cmd.startswith(partial)]
             for candidate in sorted(candidates):
-                yield Completion(candidate, start_position=-len(words[-1]))
+                coder = getattr(self.commands, "coder", None)
+                model = getattr(coder, "main_model", None) if candidate == "/model" else None
+                metadata = f"当前模型: {model.name}" if model else ""
+                yield Completion(candidate, start_position=-len(words[-1]), display_meta=metadata)
             return
 
         if len(words) <= 1 or text[-1].isspace():
@@ -554,7 +557,8 @@ class InputOutput:
 
         app = Application(
             layout=Layout(HSplit([
-                Label("选择模型 · ↑↓ 选择 · Enter 确认 · Esc 取消"), listing,
+                Label(f"/model · 当前模型: {getattr(self, 'current_model_name', '未选择')}\n"
+                      "↑↓ 选择 · Enter 确认 · Esc 取消"), listing,
             ]), focused_element=listing),
             key_bindings=bindings,
             input=self.prompt_session.app.input,
@@ -565,6 +569,70 @@ class InputOutput:
                                    "radio-checked": tokens.success}),
         )
         return app.run()
+
+    def _command_panel(self, commands, bindings):
+        """命令建议显示在输入框上方，方向键只选择建议，不切换输入历史。"""
+        from prompt_toolkit.layout import ConditionalContainer, Window
+        from prompt_toolkit.layout.controls import FormattedTextControl
+        from prompt_toolkit.widgets import Frame
+
+        buffer = self.prompt_session.default_buffer
+        selection = {"text": None, "index": 0}
+
+        def candidates():
+            text = buffer.text
+            if not text.startswith("/") or any(char.isspace() for char in text):
+                return []
+            names = sorted(commands.get_commands())
+            matches = [name for name in names if name.startswith(text)]
+            # 精确输入 /model 时仅显示该命令，避免 /models 混在旁边。
+            matches = [text] if text in matches else matches
+            if selection["text"] != text:
+                selection.update(text=text, index=0)
+            if matches:
+                selection["index"] %= len(matches)
+            return matches
+
+        active = Condition(lambda: bool(candidates())) & ~is_searching & ~is_done
+
+        def render():
+            names = candidates()
+            rows = []
+            start = max(0, selection["index"] - 5)
+            for index in range(start, min(len(names), start + 6)):
+                name = names[index]
+                method = getattr(commands, "cmd_" + name[1:].replace("-", "_"))
+                description = (method.__doc__ or "").strip().split("\n")[0]
+                if name == "/model":
+                    description = f"显示或切换当前会话模型 · 当前: {commands.coder.main_model.name}"
+                style = "class:completion-menu.completion.current" if index == selection["index"] else ""
+                rows.extend([(style, "› " if index == selection["index"] else "  "),
+                             (style, name + "  "), ("", description + "\n")])
+            if rows:
+                rows[-1] = (rows[-1][0], rows[-1][1].rstrip("\n"))
+            return rows
+
+        @bindings.add("up", filter=active, eager=True)
+        @bindings.add("down", filter=active, eager=True)
+        def move(event):
+            names = candidates()
+            direction = -1 if event.key_sequence[-1].key == "up" else 1
+            selection["index"] = (selection["index"] + direction) % len(names)
+
+        @bindings.add("tab", filter=active, eager=True)
+        def complete(event):
+            event.current_buffer.text = candidates()[selection["index"]]
+            event.current_buffer.cursor_position = len(event.current_buffer.text)
+
+        @bindings.add("enter", filter=active, eager=True)
+        def accept(event):
+            complete(event)
+            event.current_buffer.validate_and_handle()
+
+        return ConditionalContainer(
+            Frame(Window(FormattedTextControl(render), wrap_lines=True, dont_extend_height=True),
+                  title="Commands"), filter=active,
+        )
 
     def get_input(
         self,
@@ -679,6 +747,8 @@ class InputOutput:
                 # In normal mode, Alt+Enter adds a newline
                 event.current_buffer.insert_text("\n")
 
+        panel = self._command_panel(commands, kb) if self.prompt_session else None
+
         while True:
             if multiline_input:
                 show = self.prompt_prefix
@@ -699,17 +769,26 @@ class InputOutput:
                     def get_continuation(width, line_number, is_soft_wrap):
                         return self.prompt_prefix
 
-                    line = self.prompt_session.prompt(
-                        show,
-                        default=default,
-                        completer=completer_instance,
-                        reserve_space_for_menu=4,
-                        complete_style=CompleteStyle.MULTI_COLUMN,
-                        style=style,
-                        key_bindings=kb,
-                        complete_while_typing=True,
-                        prompt_continuation=get_continuation,
-                    )
+                    from prompt_toolkit.layout import HSplit
+
+                    layout = self.prompt_session.layout
+                    original = layout.container
+                    layout.container = HSplit([panel, original])
+                    try:
+                        line = self.prompt_session.prompt(
+                            show,
+                            default=default,
+                            completer=completer_instance,
+                            reserve_space_for_menu=0,
+                            complete_style=CompleteStyle.MULTI_COLUMN,
+                            style=style,
+                            key_bindings=kb,
+                            complete_while_typing=Condition(
+                                lambda: not self.prompt_session.default_buffer.text.startswith("/")),
+                            prompt_continuation=get_continuation,
+                        )
+                    finally:
+                        layout.container = original
                 else:
                     line = input(show)
 

@@ -105,6 +105,7 @@ class Commands:
                 choices = [(index, f"{p.get('name') or '供应商'} / {p['model']}"
                             + (" · 当前" if p.get("id") == current_id else ""))
                            for index, p in enumerate(providers)]
+                self.io.current_model_name = self.coder.main_model.name
                 selected = self.io.select_model(choices)
                 if selected is None:
                     return
