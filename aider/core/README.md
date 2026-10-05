@@ -137,6 +137,18 @@ pytest tests/test_*.py -v
 
 ---
 
+## CLI 接入
+
+- `aider admin` 中保存的模型在 CLI 启动和 `/model` 选择后使用原生
+  OpenAI Chat、OpenAI Responses 或 Anthropic SDK。其他模型保持原有接入方式。
+- 自动读取项目 `.ai/project.md`、`decisions.md`、`tasks.md`、`memory.md`，
+  作为稳定提示词前缀。`/memory` 查看，`/memory add 内容` 追加，
+  `/memory reload` 在文件修改后重新加载。
+- 每次回复展示本次和累计缓存命中率，`/cache` 查看会话统计；
+  网关未返回缓存字段时显示“未返回统计”，不当作零命中。
+- 深色主题默认启用，`--light-mode` 切换浅色。手动颜色配置保留。
+- 缓存标记默认启用，`--no-cache-prompts` 可关闭 Anthropic 缓存标记。
+
 ## License
 
 与 Aider 主项目保持一致。
