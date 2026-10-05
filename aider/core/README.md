@@ -39,7 +39,8 @@ prompt = format_handoff_for_prompt(handoff)
 固定容量的三级分层历史记录系统。
 
 **特性**:
-- ✅ 三级存储：recent (50轮) / earlier (51-150轮) / oldest (151+轮)
+- ✅ 三级存储：recent 最多 12 条 / earlier 最多 6 条 / oldest 最多 4 条
+- ✅ 每条容量依次为 160 / 100 / 60 字符；越旧越粗略
 - ✅ 智能压缩：保留关键信息，丢弃冗余内容
 - ✅ 关键词提取和动作总结
 - ✅ 持久化存储（JSON）
@@ -51,14 +52,13 @@ prompt = format_handoff_for_prompt(handoff)
 ```python
 from aider.core import SessionChronicle
 
-chronicle = SessionChronicle(max_tokens=8000)
-chronicle.add_turn(user_msg, assistant_msg, tools_used)
+chronicle = SessionChronicle(storage_path="session.json")
+chronicle.add_turn(user_msg, assistant_msg, tool_calls=tools_used)
 
 # 获取史书文本
 text = chronicle.get_chronicle_text()
 
-# 持久化
-chronicle.save("session.json")
+# 配置 storage_path 后每次 add_turn 自动持久化
 ```
 
 ---
@@ -148,6 +148,18 @@ pytest tests/test_*.py -v
   网关未返回缓存字段时显示“未返回统计”，不当作零命中。
 - 深色主题默认启用，`--light-mode` 切换浅色。手动颜色配置保留。
 - 缓存标记默认启用，`--no-cache-prompts` 可关闭 Anthropic 缓存标记。
+- 发送前检查完整请求（系统提示、项目资料、历史及当前输入），默认达到上下文
+  容量的 75% 时执行本地交接；小窗口还需满足输出预留及安全余量。
+  512,000 上下文的默认触发值为 384,000 tokens。
+- 自动交接复用 `local_handoff.py`，保留近期原文和当前请求，不调用摘要模型。
+  `/compact` 手动交接，`/compact status` 查看阈值与史书分层统计。
+  显式 `--max-chat-history-tokens` 仍可额外限制原文历史预算。
+- 每回合复用 `session_chronicle.py` 生成有界的分层记忆；史书每回合保存，
+  交接提示词仅在压缩时更新，以保持前缀缓存稳定。
+- 状态保存在聊天历史旁的 `.context.json` 文件，恢复时依据历史锚点续接，
+  不覆盖原始聊天日志；模型切换保留状态，`/clear`、`/reset` 同时清除活动记忆。
+- `.ai/` 是显式维护的项目长期记忆；分层史书属于当前会话，不自动将聊天结论
+  写入项目决策文件，也不表示对目标完成情况做了核验。
 
 ## License
 

@@ -32,6 +32,7 @@ from aider import __version__, models, prompts, urls, utils
 from aider.analytics import Analytics
 from aider.commands import Commands
 from aider.core.cache_optimizer import CacheOptimizer, extract_cache_stats_from_usage
+from aider.core.context_manager import ContextManager
 from aider.project_memory import load_project_memory
 from aider.exceptions import LiteLLMExceptions
 from aider.history import ChatSummary
@@ -162,7 +163,11 @@ class Coder:
             done_messages = from_coder.done_messages
             if edit_format != from_coder.edit_format and done_messages and summarize_from_coder:
                 try:
-                    done_messages = from_coder.summarizer.summarize_all(done_messages)
+                    if getattr(from_coder, "context_manager", None):
+                        from_coder.compact_context()
+                        done_messages = from_coder.done_messages
+                    else:
+                        done_messages = from_coder.summarizer.summarize_all(done_messages)
                 except ValueError:
                     # If summarization fails, keep the original messages and warn the user
                     io.tool_warning(
@@ -183,6 +188,7 @@ class Coder:
                 total_tokens_received=from_coder.total_tokens_received,
                 file_watcher=from_coder.file_watcher,
                 cache_optimizer=from_coder.cache_optimizer,
+                context_manager=getattr(from_coder, "context_manager", None),
             )
             use_kwargs.update(update)  # override to complete the switch
             use_kwargs.update(kwargs)  # override passed kwargs
@@ -217,6 +223,9 @@ class Coder:
         context = model.info.get("max_input_tokens")
         if context:
             details.append(f"上下文容量: {context:,}")
+        manager = getattr(self, "context_manager", None)
+        if manager:
+            details.append(f"自动交接: {manager.threshold_percent}%（{manager.threshold(model):,} tokens）")
         self.io.tool_output(" · ".join(details))
 
     def get_announcements(self):
@@ -354,6 +363,7 @@ class Coder:
         auto_copy_context=False,
         auto_accept_architect=True,
         cache_optimizer=None,
+        context_manager=None,
     ):
         # Fill in a dummy Analytics if needed, but it is never .enable()'d
         self.analytics = analytics if analytics is not None else Analytics()
@@ -552,6 +562,10 @@ class Coder:
         self.summarizer_thread = None
         self.summarized_done_messages = []
         self.summarizing_messages = None
+        self.context_manager = context_manager or ContextManager(
+            self.io.chat_history_file, io=self.io, restore=restore_chat_history,
+            history_limit=getattr(getattr(self.commands, "args", None), "max_chat_history_tokens", None),
+        )
 
         self.restored_messages = []
         if not self.done_messages and restore_chat_history:
@@ -560,7 +574,7 @@ class Coder:
                 self.done_messages = utils.split_chat_history_markdown(history_md)
                 # 展示完整历史快照，不受后台上下文摘要影响。
                 self.restored_messages = list(self.done_messages)
-                self.summarize_start()
+                self.done_messages = self.context_manager.restore_messages(self.done_messages)
 
         # Linting and testing
         self.linter = Linter(root=self.root, encoding=io.encoding)
@@ -969,19 +983,31 @@ class Coder:
         else:
             message = user_message
 
-        while message:
-            self.reflected_message = None
-            list(self.send_message(message))
+        if not message:
+            return
+        status = "partial"
+        self._turn_status = None
+        self.partial_response_content = ""
+        try:
+            while message:
+                self.reflected_message = None
+                list(self.send_message(message))
 
-            if not self.reflected_message:
-                break
+                if not self.reflected_message:
+                    status = self._turn_status or ("success" if self.partial_response_content else "error")
+                    break
 
-            if self.num_reflections >= self.max_reflections:
-                self.io.tool_warning(f"Only {self.max_reflections} reflections allowed, stopping.")
-                return
+                if self.num_reflections >= self.max_reflections:
+                    self.io.tool_warning(f"Only {self.max_reflections} reflections allowed, stopping.")
+                    return
 
-            self.num_reflections += 1
-            message = self.reflected_message
+                self.num_reflections += 1
+                message = self.reflected_message
+        except BaseException as error:
+            status = "interrupted" if isinstance(error, (KeyboardInterrupt, SystemExit)) else "error"
+            raise
+        finally:
+            self.context_manager.record_turn(user_message, self.partial_response_content, status)
 
     def check_and_open_urls(self, exc, friendly_msg=None):
         """Check exception for URLs, offer to open in a browser, with user-friendly error msgs."""
@@ -1040,6 +1066,9 @@ class Coder:
         self.last_keyboard_interrupt = now
 
     def summarize_start(self):
+        if getattr(self, "context_manager", None):
+            # 自动交接在发送前检查完整请求，不再用 8192-token 历史摘要阈值。
+            return
         if not self.summarizer.too_big(self.done_messages):
             return
 
@@ -1272,6 +1301,9 @@ class Coder:
         main_sys = self.fmt_system_prompt(self.gpt_prompts.main_system)
         if self.project_memory:
             main_sys += "\n\n" + self.project_memory
+        handoff = self.context_manager.prompt()
+        if handoff:
+            main_sys += "\n\n" + handoff
         if self.main_model.system_prompt_prefix:
             main_sys = self.main_model.system_prompt_prefix + "\n" + main_sys
 
@@ -1393,10 +1425,30 @@ class Coder:
 
     def format_messages(self):
         chunks = self.format_chat_chunks()
+        if self.context_manager.should_compact(self.main_model, chunks.all_messages(), self.functions,
+                                              self.done_messages + self.cur_messages):
+            if self.compact_context():
+                chunks = self.format_chat_chunks()
+                if self.context_manager.should_compact(self.main_model, chunks.all_messages(), self.functions,
+                                                      self.done_messages + self.cur_messages):
+                    self.io.tool_warning("交接后仍达到上下文阈值，请减少附加文件或缩短当前输入")
         if self.add_cache_headers:
             chunks.add_cache_control_headers()
 
         return chunks
+
+    def compact_context(self):
+        """执行本地交接，聊天日志保留原文，当前用户请求保持完整。"""
+        messages = self.done_messages + self.cur_messages
+        remaining, changed = self.context_manager.compact(self.main_model, messages)
+        if not changed:
+            return False
+        removed = len(messages) - len(remaining)
+        done_removed = min(removed, len(self.done_messages))
+        self.done_messages = self.done_messages[done_removed:]
+        self.cur_messages = self.cur_messages[removed - done_removed:]
+        self.io.tool_output(f"本地交接完成 · 历史归档 {removed} 条 · 保留近期原文 {len(remaining)} 条 · 无模型摘要调用")
+        return True
 
     def warm_cache(self, chunks):
         if not self.add_cache_headers:
@@ -1604,6 +1656,7 @@ class Coder:
         self.add_assistant_reply_to_cur_messages()
 
         if exhausted:
+            self._turn_status = "partial"
             if self.cur_messages and self.cur_messages[-1]["role"] == "user":
                 self.cur_messages += [
                     dict(
@@ -1643,6 +1696,7 @@ class Coder:
                 interrupted = True
 
         if interrupted:
+            self._turn_status = "interrupted"
             if self.cur_messages and self.cur_messages[-1]["role"] == "user":
                 self.cur_messages[-1]["content"] += "\n^C KeyboardInterrupt"
             else:
@@ -2086,6 +2140,9 @@ class Coder:
             cache_hit_tokens = stats["cache_read_tokens"]
             cache_write_tokens = stats["cache_creation_tokens"]
             prompt_tokens = stats["prompt_tokens"]
+            manager = getattr(self, "context_manager", None)
+            if manager:
+                manager.last_input_tokens = prompt_tokens
             completion_tokens = stats["completion_tokens"]
             self.message_tokens_sent += prompt_tokens
 

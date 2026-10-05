@@ -147,6 +147,20 @@ class Commands:
         "Show session prompt cache statistics"
         self.io.tool_output(self.coder.cache_optimizer.format_stats(verbose=args.strip() == "verbose"))
 
+    def cmd_compact(self, args):
+        "Compact context locally, or show status with /compact status"
+        manager = self.coder.context_manager
+        if args.strip() == "status":
+            threshold = manager.threshold(self.coder.main_model)
+            stats = manager.chronicle.get_stats()
+            self.io.tool_output(f"自动交接阈值: {manager.threshold_percent}%（{threshold:,} tokens，含输出预留）"
+                                f" · 已交接 {manager.compactions} 次 · 史书 {stats['total_turns']} 回合"
+                                f" · 近期/较早/最早: {stats['recent_entries']}/{stats['earlier_entries']}/{stats['oldest_entries']}")
+        elif args.strip():
+            self.io.tool_error("用法：/compact 或 /compact status")
+        elif not self.coder.compact_context():
+            self.io.tool_output("当前历史不足，无需交接")
+
     def cmd_memory(self, args):
         "View, reload or add project memory: /memory [reload|add text]"
         from aider.project_memory import append_project_memory, load_project_memory
@@ -491,6 +505,9 @@ class Commands:
             self.coder.abs_read_only_fnames = set()
 
     def _clear_chat_history(self):
+        manager = getattr(self.coder, "context_manager", None)
+        if manager:
+            manager.clear(self.coder.done_messages + self.coder.cur_messages)
         self.coder.done_messages = []
         self.coder.cur_messages = []
 
