@@ -146,6 +146,25 @@ class Commands:
         "Show session prompt cache statistics"
         self.io.tool_output(self.coder.cache_optimizer.format_stats(verbose=args.strip() == "verbose"))
 
+    def cmd_memory(self, args):
+        "View, reload or add project memory: /memory [reload|add text]"
+        from aider.project_memory import append_project_memory, load_project_memory
+
+        value = args.strip()
+        try:
+            if value.startswith("add "):
+                added = append_project_memory(self.coder.root, "memory.md", value[4:])
+                self.coder.project_memory = load_project_memory(self.coder.root)
+                self.io.tool_output("已写入 .ai/memory.md" if added else "这条记忆已存在")
+            elif value == "reload":
+                self.coder.project_memory = load_project_memory(self.coder.root)
+                self.io.tool_output("项目记忆已重新加载")
+            elif not value:
+                self.io.tool_output(self.coder.project_memory or "暂无项目记忆，可用 /memory add 内容 添加")
+            else:
+                self.io.tool_error("用法：/memory、/memory reload 或 /memory add 内容")
+        except (OSError, ValueError) as error:
+            self.io.tool_error(str(error))
 
     def cmd_editor_model(self, args):
         "Switch the Editor Model to a new LLM"

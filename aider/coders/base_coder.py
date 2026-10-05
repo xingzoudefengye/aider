@@ -32,6 +32,7 @@ from aider import __version__, models, prompts, urls, utils
 from aider.analytics import Analytics
 from aider.commands import Commands
 from aider.core.cache_optimizer import CacheOptimizer, extract_cache_stats_from_usage
+from aider.project_memory import load_project_memory
 from aider.exceptions import LiteLLMExceptions
 from aider.history import ChatSummary
 from aider.io import ConfirmGroup, InputOutput
@@ -478,6 +479,7 @@ class Coder:
 
         if not self.repo:
             self.root = utils.find_common_root(self.abs_fnames)
+        self.project_memory = load_project_memory(self.root)
 
         is_openai_gpt = (main_model.name.startswith("openai/")
                          and main_model.name.rsplit("/", 1)[-1].startswith("gpt-"))
@@ -1249,6 +1251,8 @@ class Coder:
     def format_chat_chunks(self):
         self.choose_fence()
         main_sys = self.fmt_system_prompt(self.gpt_prompts.main_system)
+        if self.project_memory:
+            main_sys += "\n\n" + self.project_memory
         if self.main_model.system_prompt_prefix:
             main_sys = self.main_model.system_prompt_prefix + "\n" + main_sys
 
