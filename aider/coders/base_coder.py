@@ -33,7 +33,7 @@ from aider.analytics import Analytics
 from aider.commands import Commands
 from aider.core.cache_optimizer import CacheOptimizer, extract_cache_stats_from_usage
 from aider.core.context_manager import ContextManager
-from aider.project_memory import load_project_memory
+from aider.project_memory import load_project_memory, remember_project_turn, retrieve_project_memory
 from aider.exceptions import LiteLLMExceptions
 from aider.history import ChatSummary
 from aider.io import ConfirmGroup, InputOutput
@@ -502,6 +502,7 @@ class Coder:
         if not self.repo:
             self.root = utils.find_common_root(self.abs_fnames)
         self.project_memory = load_project_memory(self.root)
+        self.retrieved_memory = ""
 
         is_openai_gpt = (main_model.name.startswith("openai/")
                          and main_model.name.rsplit("/", 1)[-1].startswith("gpt-"))
@@ -985,6 +986,13 @@ class Coder:
 
         if not message:
             return
+        try:
+            self.retrieved_memory = retrieve_project_memory(self.root, user_message,
+                                                           self.io.chat_history_file,
+                                                           session_id=self.context_manager.session_id)
+        except (OSError, UnicodeError, ValueError) as error:
+            self.retrieved_memory = ""
+            self.io.tool_warning(f"无法检索项目记忆：{error}")
         status = "partial"
         self._turn_status = None
         self.partial_response_content = ""
@@ -1008,6 +1016,12 @@ class Coder:
             raise
         finally:
             self.context_manager.record_turn(user_message, self.partial_response_content, status)
+            try:
+                remember_project_turn(self.root, self.io.chat_history_file, user_message,
+                                      self.partial_response_content, status,
+                                      session_id=self.context_manager.session_id)
+            except (OSError, UnicodeError, ValueError, TimeoutError) as error:
+                self.io.tool_warning(f"无法保存自动项目记忆：{error}")
 
     def check_and_open_urls(self, exc, friendly_msg=None):
         """Check exception for URLs, offer to open in a browser, with user-friendly error msgs."""
@@ -1385,6 +1399,9 @@ class Coder:
             reminder_message = []
 
         chunks.cur = list(self.cur_messages)
+        if self.retrieved_memory and chunks.cur and chunks.cur[-1]["role"] == "user":
+            # 检索结果放在请求尾部，固定的系统/项目前缀不随每次检索变化。
+            chunks.cur.insert(len(chunks.cur) - 1, dict(role="user", content=self.retrieved_memory))
         chunks.reminder = []
 
         # TODO review impact of token count on image messages

@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import uuid
 from dataclasses import asdict
 from pathlib import Path
 
@@ -15,6 +16,7 @@ class ContextManager:
     def __init__(self, history_file=None, io=None, restore=False, history_limit=None):
         self.path = Path(str(history_file) + ".context.json") if history_file else None
         self.io = io
+        self.session_id = uuid.uuid4().hex
         self.chronicle = SessionChronicle()
         self.handoff = ""
         self.memory = ""
@@ -146,6 +148,7 @@ class ContextManager:
         if not self.path or not self.persistence_enabled:
             return
         data = {"version": 1, "handoff": self.handoff, "memory": self.memory,
+                "session_id": self.session_id,
                 "checkpoint": self.checkpoint, "compactions": self.compactions,
                 "last_turn_digest": self.last_turn_digest,
                 "turn_counter": self.chronicle.turn_counter}
@@ -165,6 +168,7 @@ class ContextManager:
             data = json.loads(self.path.read_text(encoding="utf-8"))
             if data.get("version") != 1:
                 raise ValueError("不支持的记忆版本")
+            self.session_id = data.get("session_id") or self.session_id
             self.handoff = data["handoff"][:6_000]
             self.memory = data["memory"][:6_000]
             self.checkpoint = data["checkpoint"]

@@ -162,8 +162,8 @@ class Commands:
             self.io.tool_output("当前历史不足，无需交接")
 
     def cmd_memory(self, args):
-        "View, reload or add project memory: /memory [reload|add text]"
-        from aider.project_memory import append_project_memory, load_project_memory
+        "View, reload, search or add project memory: /memory [reload|search text|add text]"
+        from aider.project_memory import append_project_memory, load_project_memory, retrieve_project_memory
 
         value = args.strip()
         try:
@@ -174,10 +174,13 @@ class Commands:
             elif value == "reload":
                 self.coder.project_memory = load_project_memory(self.coder.root)
                 self.io.tool_output("项目记忆已重新加载")
+            elif value.startswith("search "):
+                found = retrieve_project_memory(self.coder.root, value[7:])
+                self.io.tool_output(found or "未找到相关项目记忆")
             elif not value:
                 self.io.tool_output(self.coder.project_memory or "暂无项目记忆，可用 /memory add 内容 添加")
             else:
-                self.io.tool_error("用法：/memory、/memory reload 或 /memory add 内容")
+                self.io.tool_error("用法：/memory、/memory reload、/memory search 关键词 或 /memory add 内容")
         except (OSError, ValueError) as error:
             self.io.tool_error(str(error))
 

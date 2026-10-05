@@ -57,12 +57,14 @@ def _sanitize_text(text: str, max_chars: int = 160) -> str:
 
     # 脱敏密钥/令牌
     text = re.sub(
-        r'(?:["\']?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|passwd|密码|密钥|令牌)["\']?\s*[:=：]\s*)(?:"[^"\r\n]*"|\'[^\'\r\n]*\'|[^\s,;，；}\r\n]+)',
+        r'(?:["\']?(?:api[ _-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|passwd|密码|密钥|令牌)["\']?\s*[:=：]\s*)(?:"[^"\r\n]*"|\'[^\'\r\n]*\'|[^\s,;，；}\r\n]+)',
         '[已脱敏]',
         text,
         flags=re.IGNORECASE
     )
 
+    text = re.sub(r'\b(?:bearer\s+\S+|(?:sk-|gh[pousr]_|github_pat_|AKIA)[\w-]+|eyJ[\w-]+\.[\w-]+\.[\w-]+)\b',
+                  '[已脱敏]', text, flags=re.IGNORECASE)
     return text[:max_chars].strip()
 
 

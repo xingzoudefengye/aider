@@ -12,7 +12,7 @@ E:\Projects\ComeCode\engine\apps\zcode-cli\packages\core\src\compact\chronicle.t
 
 import json
 import time
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, replace
 from pathlib import Path
 from typing import List, Optional, Dict
 
@@ -151,8 +151,25 @@ class SessionChronicle:
 
     def _compact_if_needed(self) -> None:
         """容量不足时自动分层压缩"""
+        now = time.time()
+        # 即使没有新增很多回合，超过 7/30 天的记录也会降到更粗的层级。
+        recent = []
+        for entry in self.recent_entries:
+            if now - entry.timestamp > 7 * 86_400:
+                self.earlier_entries.append(replace(entry, summary=entry.summary[:EARLIER_MAX_CHARS_PER_ENTRY]))
+            else:
+                recent.append(entry)
+        self.recent_entries = recent
+        earlier = []
+        for entry in self.earlier_entries:
+            if now - entry.timestamp > 30 * 86_400:
+                self.oldest_entries.append(replace(entry, summary=entry.summary[:OLDEST_MAX_CHARS_PER_ENTRY]))
+            else:
+                earlier.append(entry)
+        self.earlier_entries = sorted(earlier, key=lambda entry: entry.timestamp)
+        self.oldest_entries.sort(key=lambda entry: entry.timestamp)
         # 1. 近期条目超限 → 合并最旧的几条到 earlier
-        if len(self.recent_entries) > RECENT_MAX_ENTRIES:
+        while len(self.recent_entries) > RECENT_MAX_ENTRIES:
             overflow_count = len(self.recent_entries) - RECENT_MAX_ENTRIES
             merge_count = min(overflow_count + 2, 4)  # 每次合并 2-4 条
 
@@ -163,7 +180,7 @@ class SessionChronicle:
             self.earlier_entries.append(merged)
 
         # 2. 早期条目超限 → 合并最旧的几条到 oldest
-        if len(self.earlier_entries) > EARLIER_MAX_ENTRIES:
+        while len(self.earlier_entries) > EARLIER_MAX_ENTRIES:
             overflow_count = len(self.earlier_entries) - EARLIER_MAX_ENTRIES
             merge_count = min(overflow_count + 1, 3)  # 每次合并 1-3 条
 
@@ -293,6 +310,7 @@ class SessionChronicle:
             self.oldest_entries = [
                 ChronicleEntry(**e) for e in data.get("oldest_entries", [])
             ]
+            self._compact_if_needed()
         except (json.JSONDecodeError, TypeError, KeyError):
             # 损坏时重置
             pass

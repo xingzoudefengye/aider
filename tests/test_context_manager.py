@@ -72,6 +72,13 @@ def test_turn_recording_is_local_bounded_and_does_not_change_prompt(tmp_path, mo
         coder.run_one("处理接口", preproc=False)
         coder.run_one("处理接口", preproc=False)
     assert coder.context_manager.chronicle.turn_counter == 2
+    assert (tmp_path / ".ai" / "memory.json").is_file()
+    coder.retrieved_memory = "来自其他会话的参考资料"
+    coder.cur_messages.append({"role": "user", "content": "当前问题"})
+    chunks = coder.format_messages()
+    assert chunks.cur[-2]["content"] == coder.retrieved_memory
+    assert chunks.cur[-1]["content"] == "当前问题"
+    assert coder.retrieved_memory not in chunks.system[0]["content"]
     snapshot = coder.context_manager.prompt()
     for index in range(200):
         coder.context_manager.record_turn(f"目标 {index}", "已完成部分修改 api_key=private-test")
