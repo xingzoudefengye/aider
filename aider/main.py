@@ -1064,6 +1064,10 @@ def main(argv=None, input=None, output=None, force_git_root=None, return_coder=F
     coder.show_announcements()
     if args.restore_chat_history:
         coder.io.show_chat_history(coder.restored_messages)
+        coder.show_model_status()
+    from aider.onboarding import save_session_model
+
+    save_session_model(coder.io, coder.main_model)
 
     if args.show_prompts:
         coder.cur_messages += [
@@ -1199,6 +1203,7 @@ def main(argv=None, input=None, output=None, force_git_root=None, return_coder=F
                 del kwargs["show_announcements"]
 
             coder = Coder.create(**kwargs)
+            save_session_model(coder.io, coder.main_model)
 
             if switch.kwargs.get("show_announcements") is not False:
                 coder.show_announcements()

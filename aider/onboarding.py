@@ -133,6 +133,16 @@ def select_web_default_model(args, git_root, io):
     """CLI 与恢复会话共用 Aider Web 默认配置，不读取其他项目的供应商。"""
     if args.model:
         return False
+    saved = {}
+    if getattr(args, "restore_chat_history", False) and io.chat_history_file:
+        path = Path(str(io.chat_history_file) + ".model.json")
+        if path.is_file():
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(saved, dict):
+                raise ValueError("会话模型记录格式无效")
+        if saved.get("model") and not saved.get("provider_id"):
+            args.model = saved["model"]
+            return False
     enabled = load_web_models(git_root)
     if not enabled:
         paths = [Path.cwd() / ".aider.providers.json"]
@@ -142,10 +152,31 @@ def select_web_default_model(args, git_root, io):
             return False
     if not enabled:
         raise ValueError("Web 配置中没有启用的模型，请在管理页启用一个模型")
-    provider = next((p for p in enabled if p.get("is_default")), enabled[0])
+    provider = next((p for p in enabled if saved.get("provider_id") and
+                     p.get("id") == saved["provider_id"]), None)
+    if saved.get("provider_id") and provider is None:
+        io.tool_warning("会话上次使用的模型已删除或停用，将使用当前默认模型")
+    restored = provider is not None
+    provider = provider or next((p for p in enabled if p.get("is_default")), enabled[0])
     apply_web_model(args, provider)
-    io.tool_output(f"Using Web default provider: {provider.get('name') or '供应商'} / {provider['model']}")
+    source = "会话模型" if restored else "Web 默认模型"
+    io.tool_output(f"使用{source}: {provider.get('name') or '供应商'} / {provider['model']}")
     return True
+
+
+def save_session_model(io, model):
+    """按历史文件保存模型引用，不复制供应商密钥或改变全局默认模型。"""
+    if not io.chat_history_file:
+        return
+    path = Path(str(io.chat_history_file) + ".model.json")
+    data = {"model": model.name, "provider_id": getattr(model, "_web_provider_id", None)}
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary.replace(path)
+    except OSError as error:
+        io.tool_warning(f"无法保存会话模型：{error}")
 
 
 def apply_web_model(args, provider):

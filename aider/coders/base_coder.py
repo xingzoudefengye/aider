@@ -207,6 +207,19 @@ class Coder:
         new_coder = Coder.create(from_coder=self, **kwargs)
         return new_coder
 
+    def show_model_status(self):
+        """历史回放后展示实际生效的模型配置，避免只看到旧消息里的模型名。"""
+        model = self.main_model
+        details = [f"当前模型: {model.name}", f"编辑模式: {self.edit_format}"]
+        effort = model.get_reasoning_effort()
+        if effort:
+            details.append(f"思考强度: {effort}")
+        context = model.info.get("max_input_tokens")
+        if context:
+            details.append(f"上下文容量: {context:,}")
+        self.io.tool_output(" · ".join(details))
+
+
     def get_announcements(self):
         lines = []
         lines.append(f"Aider v{__version__}")
