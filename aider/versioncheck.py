@@ -75,7 +75,8 @@ def check_version(io, just_check=False, verbose=False):
     import requests
 
     try:
-        response = requests.get("https://pypi.org/pypi/aider-chat/json")
+        # 可选更新检查不应无限等待网络连接或响应。
+        response = requests.get("https://pypi.org/pypi/aider-chat/json", timeout=(3, 5))
         data = response.json()
         latest_version = data["info"]["version"]
         current_version = aider.__version__
@@ -87,6 +88,9 @@ def check_version(io, just_check=False, verbose=False):
         is_update_available = packaging.version.parse(latest_version) > packaging.version.parse(
             current_version
         )
+    except KeyboardInterrupt:
+        io.tool_output("已取消版本检查")
+        return False
     except Exception as err:
         io.tool_error(f"Error checking pypi for new version: {err}")
         return False

@@ -604,8 +604,8 @@ def get_parser(default_config_files, git_root):
     group.add_argument(
         "--check-update",
         action=argparse.BooleanOptionalAction,
-        help="Check for new aider versions on launch",
-        default=True,
+        help="Check for new aider versions on launch (default: False)",
+        default=False,
     )
     group.add_argument(
         "--show-release-notes",
