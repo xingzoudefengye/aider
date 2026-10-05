@@ -15,6 +15,8 @@ from urllib.error import HTTPError
 from urllib.parse import parse_qs, unquote, urlparse
 from urllib.request import Request, urlopen
 
+from aider.model_options import effective_model_options
+
 CONFIG_FILENAME = ".aider.providers.json"
 HISTORY_FILENAME = ".aider.chat.history.md"
 SESSION_META_FILENAME = ".aider.sessions.json"
@@ -68,6 +70,7 @@ def _responses_test_result(text):
 
 def _safe_provider(provider):
     result = {k: v for k, v in provider.items() if k != "api_key"}
+    result.update(effective_model_options(provider))
     result["has_api_key_env"] = bool(provider.get("api_key_env"))
     result["has_api_key"] = bool(provider.get("api_key") or
                                  os.environ.get(provider.get("api_key_env") or ""))
@@ -122,8 +125,33 @@ class WebStore:
                 raise KeyError("模型不存在")
             value = dict(existing or {})
             allowed = ("name", "protocol", "model", "api_base", "api_key", "api_key_env",
-                       "enabled", "is_default")
+                       "enabled", "is_default", "context_window", "vision", "reasoning_effort")
             value.update({k: provider[k] for k in allowed if k in provider})
+            # 可选设置留空表示恢复默认，编辑供应商时不覆盖模型各自的设置。
+            if "context_window" in provider:
+                context = provider["context_window"]
+                if context in (None, ""):
+                    value.pop("context_window", None)
+                else:
+                    if isinstance(context, bool) or not str(context).isdigit() or int(context) < 1:
+                        raise ValueError("上下文窗口必须是正整数")
+                    value["context_window"] = int(context)
+            if "vision" in provider:
+                vision = provider["vision"]
+                if vision in (None, ""):
+                    value.pop("vision", None)
+                elif isinstance(vision, bool) or vision in ("true", "false"):
+                    value["vision"] = _as_bool(vision)
+                else:
+                    raise ValueError("图片输入必须为支持、不支持或默认")
+            if "reasoning_effort" in provider:
+                effort = provider["reasoning_effort"]
+                if effort in (None, ""):
+                    value.pop("reasoning_effort", None)
+                elif effort in ("low", "medium", "high", "xhigh", "max"):
+                    value["reasoning_effort"] = effort
+                else:
+                    raise ValueError("不支持的思考强度")
             if existing and not provider.get("api_key"):
                 value["api_key"] = existing.get("api_key")
             source_id = provider.get("source_provider_id")
@@ -148,6 +176,7 @@ class WebStore:
             value["name"] = str(value.get("name") or urlparse(base).hostname or "供应商").strip()
             value["enabled"] = _as_bool(value.get("enabled"), True)
             value["is_default"] = _as_bool(value.get("is_default"))
+            value.update(effective_model_options(value))
             value["id"] = provider_id or uuid.uuid4().hex
             if value["is_default"]:
                 for item in providers:
@@ -228,6 +257,40 @@ class WebStore:
                     return title[:60] + ("…" if len(title) > 60 else "")
         return "无标题会话"
 
+    def _session_messages(self, content):
+        """按 Aider 历史的用户标记分段，代码块中的标题不作为消息边界。"""
+        messages = []
+        role, lines, fence = None, [], None
+
+        def flush():
+            text = "\n".join(lines).strip()
+            if text and role:
+                messages.append({"role": role, "content": text})
+
+        for line in content.splitlines():
+            if line.startswith("# aider chat started at "):
+                continue
+            user = fence is None and (line.startswith("#### ") or line.startswith("#> "))
+            if user:
+                if role != "user":
+                    flush()
+                    lines = []
+                role = "user"
+                lines.append(line.split(" ", 1)[1].rstrip())
+            else:
+                if role == "user" and line.strip():
+                    flush()
+                    lines = []
+                    role = "assistant"
+                elif role is None and line.strip():
+                    role = "system"
+                lines.append(line.rstrip())
+                marker = line.lstrip()[:3]
+                if role != "user" and marker in ("```", "~~~"):
+                    fence = None if fence == marker else marker if fence is None else fence
+        flush()
+        return messages
+
     def _load_sessions(self):
         if not self.history_path.exists():
             return []
@@ -240,14 +303,17 @@ class WebStore:
             end = starts[index + 1] if index + 1 < len(starts) else len(lines)
             content = "\n".join(lines[start:end]).strip()
             info = metadata.get(str(index), {})
+            # 保留原历史和索引，删除一条不会让其他会话的标题、归档状态错位。
+            if info.get("deleted"):
+                continue
             sessions.append({"id": str(index), "title": info.get("title") or self._generate_session_title(content),
                              "started_at": lines[start].removeprefix("# aider chat started at "),
                              "updated_at": modified, "project": str(self.root),
                              "archived": bool(info.get("archived")), "content": content})
-        return sessions
+        return list(reversed(sessions))
 
     def sessions(self, project=None, updated_after=None, updated_before=None, search=None,
-                 page=1, page_size=50, archived=None):
+                 page=1, page_size=50, archived=None, sort="recent"):
         items = self._load_sessions()
         if project:
             items = [s for s in items if s["project"] == project]
@@ -256,15 +322,28 @@ class WebStore:
         if updated_before:
             items = [s for s in items if s["updated_at"] <= updated_before]
         if search:
-            items = [s for s in items if search.casefold() in (s["title"] + s["content"]).casefold()]
+            items = [s for s in items if search.casefold() in
+                     (s["title"] + s["project"] + s["content"]).casefold()]
         if archived is not None:
             items = [s for s in items if s["archived"] == archived]
+        if sort in ("project", "title"):
+            items.sort(key=lambda s: (s[sort].casefold(), -int(s["id"])))
+        if page_size is None:
+            return [{k: v for k, v in s.items() if k != "content"} for s in items]
         start = (max(1, int(page)) - 1) * min(200, max(1, int(page_size)))
         return [{k: v for k, v in s.items() if k != "content"}
                 for s in items[start:start + min(200, max(1, int(page_size)))]]
 
     def session_detail(self, session_id):
-        return next((s for s in self._load_sessions() if s["id"] == session_id), None)
+        session = next((s for s in self._load_sessions() if s["id"] == session_id), None)
+        if session:
+            session["messages"] = self._session_messages(session["content"])
+            history = self.root / ".aider.session-history" / f"{session_id}.md"
+            quoted = str(history).replace("'", "''")
+            session["restore_command"] = (
+                f"aider --restore-chat-history --chat-history-file '{quoted}'"
+            )
+        return session
 
     def _update_session(self, session_id, values):
         with self.lock:
@@ -282,6 +361,21 @@ class WebStore:
 
     def archive_session(self, session_id, archived):
         return self._update_session(session_id, {"archived": _as_bool(archived)})
+
+    def delete_session(self, session_id):
+        self._update_session(session_id, {"deleted": True})
+        return {"ok": True}
+
+    def prepare_session_restore(self, session_id):
+        with self.lock:
+            session = self.session_detail(session_id)
+            if session is None:
+                raise KeyError("会话不存在")
+            # 单独导出所选会话，恢复时不混入同项目的其他会话。
+            path = self.root / ".aider.session-history" / f"{session['id']}.md"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(session["content"] + "\n", encoding="utf-8")
+            return {"command": session["restore_command"]}
 
 
 def create_server(root, host="127.0.0.1", port=0):
@@ -332,12 +426,19 @@ def create_server(root, host="127.0.0.1", port=0):
             if path == "/api/sessions" and self.command == "GET":
                 query = {k: v[-1] for k, v in parse_qs(urlparse(self.path).query).items()}
                 allowed = {k: v for k, v in query.items() if k in (
-                    "project", "updated_after", "updated_before", "search", "page", "page_size", "archived")}
+                    "project", "updated_after", "updated_before", "search", "page", "page_size", "archived", "sort")}
                 if "archived" in allowed:
                     allowed["archived"] = _as_bool(allowed["archived"])
-                return self._send(200, store.sessions(**allowed))
+                items = store.sessions(**allowed)
+                if _as_bool(query.get("include_total")):
+                    count_args = {k: v for k, v in allowed.items() if k not in ("page", "page_size")}
+                    total = len(store.sessions(**count_args, page_size=None))
+                    return self._send(200, {"sessions": items, "total": total})
+                return self._send(200, items)
             if len(parts) >= 3 and parts[:2] == ["api", "sessions"]:
                 session_id = parts[2]
+                if len(parts) == 3 and self.command == "DELETE":
+                    return self._send(200, store.delete_session(session_id))
                 if len(parts) == 3 and self.command == "GET":
                     result = store.session_detail(session_id)
                     if result is None:
@@ -347,6 +448,8 @@ def create_server(root, host="127.0.0.1", port=0):
                     return self._send(200, store.update_session_title(session_id, data.get("title")))
                 if self.command == "POST" and parts[3:] == ["archive"]:
                     return self._send(200, store.archive_session(session_id, data.get("archived")))
+                if self.command == "POST" and parts[3:] == ["restore"]:
+                    return self._send(200, store.prepare_session_restore(session_id))
             self._send(404, {"error": "not found"})
 
         def _handle(self):

@@ -31,7 +31,7 @@ from aider.history import ChatSummary
 from aider.io import InputOutput
 from aider.llm import litellm  # noqa: F401; properly init litellm on launch
 from aider.models import ModelSettings
-from aider.onboarding import offer_openrouter_oauth, select_default_model
+from aider.onboarding import offer_openrouter_oauth, select_default_model, select_web_default_model
 from aider.repo import ANY_GIT_ERROR, GitRepo
 from aider.report import report_uncaught_exceptions
 from aider.versioncheck import check_version, install_from_main_branch, install_upgrade
@@ -454,6 +454,12 @@ def main(argv=None, input=None, output=None, force_git_root=None, return_coder=F
     if argv is None:
         argv = sys.argv[1:]
 
+    # 管理页命令须在文件参数解析前分流，避免把 admin 当成聊天文件。
+    if argv and argv[0] == "admin":
+        from aider.web import admin
+
+        return admin(argv[1:])
+
     if git is None:
         git_root = None
     elif force_git_root:
@@ -774,6 +780,11 @@ def main(argv=None, input=None, output=None, force_git_root=None, return_coder=F
             alias, model = parts
             models.MODEL_ALIASES[alias.strip()] = model.strip()
 
+    try:
+        web_model_selected = select_web_default_model(args, git_root, io)
+    except (OSError, ValueError) as error:
+        io.tool_error(f"无法读取 Web 默认模型配置：{error}")
+        return 1
     selected_model_name = select_default_model(args, io, analytics)
     if not selected_model_name:
         # Error message and analytics event are handled within select_default_model
@@ -826,6 +837,9 @@ def main(argv=None, input=None, output=None, force_git_root=None, return_coder=F
         editor_edit_format=args.editor_edit_format,
         verbose=args.verbose,
     )
+    main_model._web_configured = web_model_selected
+    if web_model_selected:
+        main_model.configure_web_settings(getattr(args, "_web_model_options", {}))
 
     # Check if deprecated remove_reasoning is set
     if main_model.remove_reasoning is not None:

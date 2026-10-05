@@ -1,18 +1,21 @@
 import base64
 import hashlib
 import http.server
+import json
 import os
 import secrets
 import socketserver
 import threading
 import time
 import webbrowser
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import requests
 
 from aider import urls
 from aider.io import InputOutput
+from aider.model_options import effective_model_options
 
 
 def check_openrouter_tier(api_key):
@@ -111,6 +114,58 @@ def offer_openrouter_oauth(io, analytics):
         # Fall through to the final error message
 
     return False
+
+
+def select_web_default_model(args, git_root, io):
+    """CLI 与恢复会话共用 Aider Web 默认配置，不读取其他项目的供应商。"""
+    if args.model:
+        return False
+    paths = [Path.cwd() / ".aider.providers.json"]
+    if git_root:
+        paths.append(Path(git_root) / ".aider.providers.json")
+    path = next((p for p in paths if p.is_file()), None)
+    if path is None:
+        return False
+    data = json.loads(path.read_text(encoding="utf-8"))
+    providers = data if isinstance(data, list) else data.get("providers", [])
+    enabled = [p for p in providers if p.get("enabled", True)]
+    if not enabled:
+        raise ValueError("Web 配置中没有启用的模型，请在管理页启用一个模型")
+    provider = next((p for p in enabled if p.get("is_default")), enabled[0])
+    protocol = provider.get("protocol", "openai-chat")
+    connections = {
+        "anthropic": ("anthropic/", "ANTHROPIC_API_KEY", "ANTHROPIC_API_BASE",
+                      "https://api.anthropic.com"),
+        "openai-chat": ("openai/", "OPENAI_API_KEY", "OPENAI_API_BASE",
+                        "https://api.openai.com/v1"),
+        "openai-responses": ("openai/responses/", "OPENAI_API_KEY", "OPENAI_API_BASE",
+                             "https://api.openai.com/v1"),
+    }
+    if protocol not in connections:
+        raise ValueError("Web 默认模型配置了不支持的协议")
+    prefix, key_env, base_env, default_base = connections[protocol]
+    model = str(provider.get("model") or "").strip()
+    if not model:
+        raise ValueError("Web 默认模型的模型 ID 不能为空")
+    cli_key = getattr(args, "anthropic_api_key" if protocol == "anthropic" else "openai_api_key", None)
+    # 命令行密钥优先；否则完整使用已保存配置，不混用其他服务的环境密钥。
+    for setting in getattr(args, "api_key", None) or []:
+        name, separator, value = setting.partition("=")
+        if separator and name.strip().upper() + "_API_KEY" == key_env:
+            cli_key = value
+    key = cli_key or provider.get("api_key") or os.environ.get(provider.get("api_key_env") or "")
+    if not key:
+        raise ValueError("Web 默认模型未配置可用的 API Key，请在管理页补充")
+    base = provider.get("api_base") or default_base
+    if protocol != "anthropic" and getattr(args, "openai_api_base", None):
+        base = args.openai_api_base
+    os.environ[key_env] = key
+    os.environ[base_env] = base.rstrip("/")
+    # 同名模型可能经由不同协议接入，显式前缀避免被模型名称推断到官方接口。
+    args.model = model if model.startswith(prefix) else prefix + model
+    args._web_model_options = effective_model_options(provider)
+    io.tool_output(f"Using Web default provider: {provider.get('name') or '供应商'} / {model}")
+    return True
 
 
 def select_default_model(args, io, analytics):

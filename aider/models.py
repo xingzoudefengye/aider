@@ -19,6 +19,7 @@ from PIL import Image
 from aider import __version__
 from aider.dump import dump  # noqa: F401
 from aider.llm import litellm
+from aider.model_options import effective_model_options
 from aider.openrouter import OpenRouterModelManager
 from aider.sendchat import ensure_alternating_roles, sanity_check_messages
 from aider.utils import check_pip_install_extra
@@ -370,6 +371,24 @@ class Model(ModelSettings):
 
     def get_model_info(self, model):
         return model_info_manager.get_model_info(model)
+
+    def configure_web_settings(self, options):
+        """将用户保存的模型能力应用到上下文管理、图片输入和请求参数。"""
+        options = effective_model_options(options)
+        self._web_configured = True
+        self.info = dict(self.info)
+        context = options.get("context_window")
+        if context is not None:
+            self.info["max_input_tokens"] = int(context)
+            self.max_chat_history_tokens = min(max(int(context) // 16, 1024), 8192)
+        if "vision" in options:
+            self.info["supports_vision"] = options["vision"]
+        effort = options.get("reasoning_effort")
+        if effort:
+            self.accepts_settings = list(self.accepts_settings or [])
+            if "reasoning_effort" not in self.accepts_settings:
+                self.accepts_settings.append("reasoning_effort")
+            self.set_reasoning_effort(effort)
 
     def _copy_fields(self, source):
         """Helper to copy fields from a ModelSettings instance to self"""
@@ -791,6 +810,11 @@ class Model(ModelSettings):
     def set_reasoning_effort(self, effort):
         """Set the reasoning effort parameter for models that support it"""
         if effort is not None:
+            if getattr(self, "_web_configured", False):
+                # 交给协议适配层按模型转换为 reasoning 或 thinking 等对应字段。
+                self.extra_params = dict(self.extra_params or {})
+                self.extra_params["reasoning_effort"] = effort
+                return
             if self.name.startswith("openrouter/"):
                 if not self.extra_params:
                     self.extra_params = {}
@@ -906,6 +930,8 @@ class Model(ModelSettings):
     def get_reasoning_effort(self):
         """Get reasoning effort value if available"""
         if self.extra_params:
+            if "reasoning_effort" in self.extra_params:
+                return self.extra_params["reasoning_effort"]
             # Check for OpenRouter reasoning format
             if self.name.startswith("openrouter/"):
                 if (
@@ -1185,7 +1211,8 @@ def sanity_check_model(io, model):
     # Check for model-specific dependencies
     check_for_dependencies(io, model.name)
 
-    if not model.info:
+    # Web 中已配置的自定义模型无需匹配官方目录，缺失价格信息不阻断启动。
+    if not model.info and not getattr(model, "_web_configured", False):
         show = True
         io.tool_warning(
             f"Warning for {model}: Unknown context window size and costs, using sane defaults."
