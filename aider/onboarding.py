@@ -116,22 +116,40 @@ def offer_openrouter_oauth(io, analytics):
     return False
 
 
-def select_web_default_model(args, git_root, io):
-    """CLI 与恢复会话共用 Aider Web 默认配置，不读取其他项目的供应商。"""
-    if args.model:
-        return False
+def load_web_models(git_root=None):
+    """读取本项目管理页中启用的模型，启动和会话内选择共用。"""
     paths = [Path.cwd() / ".aider.providers.json"]
     if git_root:
         paths.append(Path(git_root) / ".aider.providers.json")
     path = next((p for p in paths if p.is_file()), None)
     if path is None:
-        return False
+        return []
     data = json.loads(path.read_text(encoding="utf-8"))
     providers = data if isinstance(data, list) else data.get("providers", [])
-    enabled = [p for p in providers if p.get("enabled", True)]
+    return [p for p in providers if p.get("enabled", True)]
+
+
+def select_web_default_model(args, git_root, io):
+    """CLI 与恢复会话共用 Aider Web 默认配置，不读取其他项目的供应商。"""
+    if args.model:
+        return False
+    enabled = load_web_models(git_root)
+    if not enabled:
+        paths = [Path.cwd() / ".aider.providers.json"]
+        if git_root:
+            paths.append(Path(git_root) / ".aider.providers.json")
+        if not any(path.is_file() for path in paths):
+            return False
     if not enabled:
         raise ValueError("Web 配置中没有启用的模型，请在管理页启用一个模型")
     provider = next((p for p in enabled if p.get("is_default")), enabled[0])
+    apply_web_model(args, provider)
+    io.tool_output(f"Using Web default provider: {provider.get('name') or '供应商'} / {provider['model']}")
+    return True
+
+
+def apply_web_model(args, provider):
+    """应用选中模型的连接信息，不修改管理页默认模型。"""
     protocol = provider.get("protocol", "openai-chat")
     connections = {
         "anthropic": ("anthropic/", "ANTHROPIC_API_KEY", "ANTHROPIC_API_BASE",
@@ -164,8 +182,12 @@ def select_web_default_model(args, git_root, io):
     # 同名模型可能经由不同协议接入，显式前缀避免被模型名称推断到官方接口。
     args.model = model if model.startswith(prefix) else prefix + model
     args._web_model_options = effective_model_options(provider)
-    io.tool_output(f"Using Web default provider: {provider.get('name') or '供应商'} / {model}")
-    return True
+    args._web_provider_id = provider.get("id")
+    args._web_model_connection = {"api_key": key, "api_base": base.rstrip("/")}
+    args._native_model_config = {
+        **args._web_model_connection, "protocol": protocol,
+        "model": model.removeprefix(prefix), "options": args._web_model_options,
+    }
 
 
 def select_default_model(args, io, analytics):

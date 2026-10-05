@@ -223,6 +223,7 @@ networkx==3.4.2
     #   -r requirements/python-compat.in
     #   scipy
     #   soundfile
+anthropic==1.11.0
 openai==2.28.0
     # via
     #   -c requirements/common-constraints.txt

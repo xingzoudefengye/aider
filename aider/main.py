@@ -757,7 +757,6 @@ def main(argv=None, input=None, output=None, force_git_root=None, return_coder=F
     io.tool_output(cmd_line, log_only=True)
 
     is_first_run = is_first_run_of_new_version(io, verbose=args.verbose)
-    check_and_load_imports(io, is_first_run, verbose=args.verbose)
 
     register_models(git_root, args.model_settings_file, io, verbose=args.verbose)
     register_litellm_models(git_root, args.model_metadata_file, io, verbose=args.verbose)
@@ -830,16 +829,24 @@ def main(argv=None, input=None, output=None, force_git_root=None, return_coder=F
             )
             return 1
 
+    check_and_load_imports(io, is_first_run, verbose=args.verbose, native=web_model_selected)
     main_model = models.Model(
         args.model,
         weak_model=args.weak_model,
         editor_model=args.editor_model,
         editor_edit_format=args.editor_edit_format,
         verbose=args.verbose,
+        native_config=getattr(args, "_native_model_config", None),
     )
     main_model._web_configured = web_model_selected
     if web_model_selected:
         main_model.configure_web_settings(getattr(args, "_web_model_options", {}))
+        main_model._web_provider_id = getattr(args, "_web_provider_id", None)
+        # 绑定连接信息，切换供应商后旧模型仍可用于会话摘要。
+        for related in (main_model, main_model.weak_model, main_model.editor_model):
+            if related.name == main_model.name:
+                related.extra_params = dict(related.extra_params or {})
+                related.extra_params.update(args._web_model_connection)
 
     # Check if deprecated remove_reasoning is set
     if main_model.remove_reasoning is not None:
@@ -1131,7 +1138,7 @@ def main(argv=None, input=None, output=None, force_git_root=None, return_coder=F
         io.tool_output(f"Cur working dir: {Path.cwd()}")
         io.tool_output(f"Git working dir: {git_root}")
 
-    if args.stream and args.cache_prompts:
+    if args.stream and args.cache_prompts and not main_model._native_provider:
         io.tool_warning("Cost estimates may be inaccurate when using streaming and caching.")
 
     if args.load:
@@ -1237,7 +1244,7 @@ def is_first_run_of_new_version(io, verbose=False):
         return True  # Safer to assume it's a first run if we hit an error
 
 
-def check_and_load_imports(io, is_first_run, verbose=False):
+def check_and_load_imports(io, is_first_run, verbose=False, native=False):
     try:
         if is_first_run:
             if verbose:
@@ -1245,7 +1252,7 @@ def check_and_load_imports(io, is_first_run, verbose=False):
                     "First run for this version and executable, loading imports synchronously"
                 )
             try:
-                load_slow_imports(swallow=False)
+                load_slow_imports(swallow=False, native=native)
             except Exception as err:
                 io.tool_error(str(err))
                 io.tool_output("Error loading required imports. Did you install aider properly?")
@@ -1257,7 +1264,7 @@ def check_and_load_imports(io, is_first_run, verbose=False):
         else:
             if verbose:
                 io.tool_output("Not first run, loading imports in background thread")
-            thread = threading.Thread(target=load_slow_imports)
+            thread = threading.Thread(target=load_slow_imports, kwargs={"native": native})
             thread.daemon = True
             thread.start()
 
@@ -1267,7 +1274,7 @@ def check_and_load_imports(io, is_first_run, verbose=False):
             io.tool_output(f"Full exception details: {traceback.format_exc()}")
 
 
-def load_slow_imports(swallow=True):
+def load_slow_imports(swallow=True, native=False):
     # These imports are deferred in various ways to
     # improve startup time.
     # This func is called either synchronously or in a thread
@@ -1275,7 +1282,8 @@ def load_slow_imports(swallow=True):
 
     try:
         import httpx  # noqa: F401
-        import litellm  # noqa: F401
+        if not native:
+            import litellm  # noqa: F401
         import networkx  # noqa: F401
         import numpy  # noqa: F401
     except Exception as e:

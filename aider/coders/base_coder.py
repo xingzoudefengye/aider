@@ -31,6 +31,7 @@ from rich.console import Console
 from aider import __version__, models, prompts, urls, utils
 from aider.analytics import Analytics
 from aider.commands import Commands
+from aider.core.cache_optimizer import CacheOptimizer, extract_cache_stats_from_usage
 from aider.exceptions import LiteLLMExceptions
 from aider.history import ChatSummary
 from aider.io import ConfirmGroup, InputOutput
@@ -180,6 +181,7 @@ class Coder:
                 total_tokens_sent=from_coder.total_tokens_sent,
                 total_tokens_received=from_coder.total_tokens_received,
                 file_watcher=from_coder.file_watcher,
+                cache_optimizer=from_coder.cache_optimizer,
             )
             use_kwargs.update(update)  # override to complete the switch
             use_kwargs.update(kwargs)  # override passed kwargs
@@ -338,6 +340,7 @@ class Coder:
         file_watcher=None,
         auto_copy_context=False,
         auto_accept_architect=True,
+        cache_optimizer=None,
     ):
         # Fill in a dummy Analytics if needed, but it is never .enable()'d
         self.analytics = analytics if analytics is not None else Analytics()
@@ -416,6 +419,7 @@ class Coder:
         self.pretty = self.io.pretty
 
         self.main_model = main_model
+        self.cache_optimizer = cache_optimizer if cache_optimizer is not None else CacheOptimizer()
         # Set the reasoning tag name based on model settings or default
         self.reasoning_tag_name = (
             self.main_model.reasoning_tag if self.main_model.reasoning_tag else REASONING_TAG
@@ -474,6 +478,25 @@ class Coder:
 
         if not self.repo:
             self.root = utils.find_common_root(self.abs_fnames)
+
+        is_openai_gpt = (main_model.name.startswith("openai/")
+                         and main_model.name.rsplit("/", 1)[-1].startswith("gpt-"))
+        if getattr(main_model, "_web_configured", False) or is_openai_gpt:
+            # 参考 ComeCode：Codex 渠道从标准会话头读取亲和标识，仅传缓存键不足。
+            history = os.path.normcase(str(Path(self.io.chat_history_file or self.root).resolve()))
+            session_id = "aider:" + hashlib.sha256(history.encode("utf-8")).hexdigest()[:32]
+            main_model.extra_params = dict(main_model.extra_params or {})
+            session_headers = {"x-session-id", "session-id", "thread-id"}
+            headers = {key: value for key, value in
+                       (main_model.extra_params.get("extra_headers") or {}).items()
+                       if key.lower() not in session_headers}
+            headers.update({key: session_id for key in session_headers})
+            main_model.extra_params["extra_headers"] = headers
+            if is_openai_gpt:
+                main_model.extra_params.setdefault("prompt_cache_key", session_id)
+            provider = getattr(main_model, "_native_provider", None)
+            if provider and provider.protocol == "anthropic":
+                provider.session_id = session_id
 
         if read_only_fnames:
             self.abs_read_only_fnames = set()
@@ -1370,12 +1393,21 @@ class Coder:
                 kwargs["max_tokens"] = 1
 
                 try:
-                    completion = litellm.completion(
-                        model=self.main_model.name,
-                        messages=self.cache_warming_chunks.cacheable_messages(),
-                        stream=False,
-                        **kwargs,
-                    )
+                    if getattr(self.main_model, "_native_provider", None):
+                        kwargs.pop("api_key", None)
+                        kwargs.pop("api_base", None)
+                        kwargs.pop("reasoning_effort", None)
+                        completion = self.main_model._native_provider.create_completion(
+                            messages=self.cache_warming_chunks.cacheable_messages(),
+                            stream=False, **kwargs,
+                        )
+                    else:
+                        completion = litellm.completion(
+                            model=self.main_model.name,
+                            messages=self.cache_warming_chunks.cacheable_messages(),
+                            stream=False,
+                            **kwargs,
+                        )
                 except Exception as err:
                     self.io.tool_warning(f"Cache warming error: {str(err)}")
                     continue
@@ -1448,7 +1480,7 @@ class Coder:
 
         retry_delay = 0.125
 
-        litellm_ex = LiteLLMExceptions()
+        litellm_ex = LiteLLMExceptions(native=bool(getattr(self.main_model, "_native_provider", None)))
 
         self.usage_report = None
         exhausted = False
@@ -1793,6 +1825,7 @@ class Coder:
         self.io.log_llm_history("TO LLM", format_messages(messages))
 
         completion = None
+        self._stream_usage_completion = None
         try:
             hash_object, completion = model.send_completion(
                 messages,
@@ -1810,8 +1843,8 @@ class Coder:
             # Calculate costs for successful responses
             self.calculate_and_show_tokens_and_cost(messages, completion)
 
-        except LiteLLMExceptions().exceptions_tuple() as err:
-            ex_info = LiteLLMExceptions().get_ex_info(err)
+        except LiteLLMExceptions(native=bool(getattr(model, "_native_provider", None))).exceptions_tuple() as err:
+            ex_info = LiteLLMExceptions(native=bool(getattr(model, "_native_provider", None))).get_ex_info(err)
             if ex_info.name == "ContextWindowExceededError":
                 # Still calculate costs for context window errors
                 self.calculate_and_show_tokens_and_cost(messages, completion)
@@ -1901,6 +1934,9 @@ class Coder:
         received_content = False
 
         for chunk in completion:
+            # OpenAI 的最后一块常常只有 usage、没有 choices，必须先保留用量。
+            if getattr(chunk, "usage", None) is not None:
+                self._stream_usage_completion = chunk
             if len(chunk.choices) == 0:
                 continue
 
@@ -1996,22 +2032,24 @@ class Coder:
         completion_tokens = 0
         cache_hit_tokens = 0
         cache_write_tokens = 0
+        cache_reported = False
 
-        if completion and hasattr(completion, "usage") and completion.usage is not None:
-            prompt_tokens = completion.usage.prompt_tokens
-            completion_tokens = completion.usage.completion_tokens
-            cache_hit_tokens = getattr(completion.usage, "prompt_cache_hit_tokens", 0) or getattr(
-                completion.usage, "cache_read_input_tokens", 0
-            )
-            cache_write_tokens = getattr(completion.usage, "cache_creation_input_tokens", 0)
+        def field(value, name, default=None):
+            return value.get(name, default) if isinstance(value, dict) else getattr(value, name, default)
 
-            if hasattr(completion.usage, "cache_read_input_tokens") or hasattr(
-                completion.usage, "cache_creation_input_tokens"
-            ):
-                self.message_tokens_sent += prompt_tokens
-                self.message_tokens_sent += cache_write_tokens
-            else:
-                self.message_tokens_sent += prompt_tokens
+        if field(completion, "usage") is None:
+            completion = getattr(self, "_stream_usage_completion", None) or completion
+        usage = field(completion, "usage")
+
+        if usage is not None:
+            # Chat、Responses 和网关使用不同字段；零命中与未返回统计需区分。
+            stats = extract_cache_stats_from_usage(usage)
+            cache_reported = stats["cache_reported"]
+            cache_hit_tokens = stats["cache_read_tokens"]
+            cache_write_tokens = stats["cache_creation_tokens"]
+            prompt_tokens = stats["prompt_tokens"]
+            completion_tokens = stats["completion_tokens"]
+            self.message_tokens_sent += prompt_tokens
 
         else:
             prompt_tokens = self.main_model.token_count(messages)
@@ -2019,6 +2057,13 @@ class Coder:
             self.message_tokens_sent += prompt_tokens
 
         self.message_tokens_received += completion_tokens
+        if not hasattr(self, "cache_optimizer"):
+            self.cache_optimizer = CacheOptimizer()
+        self.cache_optimizer.record(
+            prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+            cache_read_tokens=cache_hit_tokens, cache_creation_tokens=cache_write_tokens,
+            cache_reported=cache_reported,
+        )
 
         tokens_report = f"Tokens: {format_tokens(self.message_tokens_sent)} sent"
 
@@ -2027,6 +2072,15 @@ class Coder:
         if cache_hit_tokens:
             tokens_report += f", {format_tokens(cache_hit_tokens)} cache hit"
         tokens_report += f", {format_tokens(self.message_tokens_received)} received."
+        if cache_reported:
+            rate = cache_hit_tokens / prompt_tokens if prompt_tokens else 0
+            tokens_report += (f"\n缓存命中率: {rate:.1%}"
+                              f"（缓存读取 {format_tokens(cache_hit_tokens)} / 输入 {format_tokens(prompt_tokens)}）")
+        else:
+            tokens_report += "\n缓存命中率: 未返回统计"
+        session_rate = self.cache_optimizer.get_session_stats()["cache_hit_rate"]
+        if session_rate is not None:
+            tokens_report += f" · 会话累计: {session_rate:.1%}"
 
         if not self.main_model.info.get("input_cost_per_token"):
             self.usage_report = tokens_report
@@ -2034,7 +2088,8 @@ class Coder:
 
         try:
             # Try and use litellm's built in cost calculator. Seems to work for non-streaming only?
-            cost = litellm.completion_cost(completion_response=completion)
+            cost = (0 if getattr(self.main_model, "_native_provider", None)
+                    else litellm.completion_cost(completion_response=completion))
         except Exception:
             cost = 0
 
@@ -2045,6 +2100,7 @@ class Coder:
 
         self.total_cost += cost
         self.message_cost += cost
+        self.cache_optimizer.history[-1].total_cost = cost
 
         def format_cost(value):
             if value == 0:
@@ -2089,12 +2145,15 @@ class Coder:
         if input_cost_per_token_cache_hit:
             # must be deepseek
             cost += input_cost_per_token_cache_hit * cache_hit_tokens
-            cost += (prompt_tokens - input_cost_per_token_cache_hit) * input_cost_per_token
+            cost += (prompt_tokens - cache_hit_tokens) * input_cost_per_token
         else:
-            # hard code the anthropic adjustments, no-ops for other models since cache_x_tokens==0
-            cost += cache_write_tokens * input_cost_per_token * 1.25
-            cost += cache_hit_tokens * input_cost_per_token * 0.10
-            cost += prompt_tokens * input_cost_per_token
+            if self.main_model.name.startswith("anthropic/"):
+                cost += cache_write_tokens * input_cost_per_token * 1.25
+                cost += cache_hit_tokens * input_cost_per_token * 0.10
+                cost += max(0, prompt_tokens - cache_write_tokens - cache_hit_tokens) * input_cost_per_token
+            else:
+                # 未知缓存单价时按输入单价估算，不重复计算 GPT 已包含的缓存 token。
+                cost += prompt_tokens * input_cost_per_token
 
         cost += completion_tokens * output_cost_per_token
         return cost

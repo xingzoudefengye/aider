@@ -45,20 +45,19 @@ class ChatChunks:
             return
 
         content = messages[-1]["content"]
-        if type(content) is str:
-            content = dict(
-                type="text",
-                text=content,
-            )
-        content["cache_control"] = {"type": "ephemeral"}
-
-        messages[-1]["content"] = [content]
+        blocks = ([{"type": "text", "text": content}] if isinstance(content, str)
+                  else [dict(block) for block in content])
+        if not blocks:
+            return
+        # 图片和多个文本块需完整保留，只在末尾块标记缓存边界。
+        blocks[-1]["cache_control"] = {"type": "ephemeral"}
+        messages[-1]["content"] = blocks
 
     def cacheable_messages(self):
         messages = self.all_messages()
         for i, message in enumerate(reversed(messages)):
-            if isinstance(message.get("content"), list) and message["content"][0].get(
-                "cache_control"
+            if isinstance(message.get("content"), list) and any(
+                block.get("cache_control") for block in message["content"]
             ):
                 return messages[: len(messages) - i]
         return messages

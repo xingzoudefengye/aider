@@ -329,13 +329,16 @@ model_info_manager = ModelInfoManager()
 
 class Model(ModelSettings):
     def __init__(
-        self, model, weak_model=None, editor_model=None, editor_edit_format=None, verbose=False
+        self, model, weak_model=None, editor_model=None, editor_edit_format=None, verbose=False,
+        native_config=None,
     ):
         # Map any alias to its canonical name
         model = MODEL_ALIASES.get(model, model)
 
         self.name = model
         self.verbose = verbose
+        self._native_provider = None
+        self._native_config = native_config
 
         self.max_chat_history_tokens = 1024
         self.weak_model = None
@@ -346,10 +349,20 @@ class Model(ModelSettings):
             (ms for ms in MODEL_SETTINGS if ms.name == "aider/extra_params"), None
         )
 
-        self.info = self.get_model_info(model)
+        if native_config:
+            from aider.providers import get_provider
+
+            self._native_provider = get_provider(
+                model=native_config["model"], protocol=native_config["protocol"],
+                api_key=native_config["api_key"], api_base=native_config["api_base"],
+            )
+            self.info = {}
+        else:
+            self.info = self.get_model_info(model)
 
         # Are all needed keys/params available?
-        res = self.validate_environment()
+        res = (dict(missing_keys=[], keys_in_environment=["Web 配置"])
+               if native_config else self.validate_environment())
         self.missing_keys = res.get("missing_keys")
         self.keys_in_environment = res.get("keys_in_environment")
 
@@ -359,6 +372,14 @@ class Model(ModelSettings):
         self.max_chat_history_tokens = min(max(max_input_tokens / 16, 1024), 8192)
 
         self.configure_model_settings(model)
+        if native_config:
+            self.configure_web_settings(native_config["options"])
+            self.cache_control = native_config["protocol"] == "anthropic"
+            # 自定义供应商的辅助调用默认使用同一连接，避免隐式转到官方模型。
+            if weak_model is None:
+                self.weak_model_name = model
+            if editor_model is None:
+                self.editor_model_name = model
         if weak_model is False:
             self.weak_model_name = None
         else:
@@ -664,9 +685,17 @@ class Model(ModelSettings):
         return self.editor_model
 
     def tokenizer(self, text):
+        if getattr(self, "_native_provider", None):
+            import tiktoken
+
+            return tiktoken.get_encoding("cl100k_base").encode(text, disallowed_special=())
         return litellm.encode(model=self.name, text=text)
 
     def token_count(self, messages):
+        if getattr(self, "_native_provider", None):
+            # 自定义模型没有官方 tokenizer，使用本地估算；实际用量以供应商返回为准。
+            text = messages if isinstance(messages, str) else json.dumps(messages, ensure_ascii=False)
+            return len(self.tokenizer(text))
         if type(messages) is list:
             try:
                 return litellm.token_counter(model=self.name, messages=messages)
@@ -1035,6 +1064,12 @@ class Model(ModelSettings):
             kwargs["tool_choice"] = {"type": "function", "function": {"name": function["name"]}}
         if self.extra_params:
             kwargs.update(self.extra_params)
+        if getattr(self, "_native_provider", None):
+            kwargs.pop("api_key", None)
+            kwargs.pop("api_base", None)
+        if stream and self.name.startswith("openai/") and not self.name.startswith("openai/responses/"):
+            # Chat 流的末尾用量块包含缓存读取信息；Responses 自带完成事件用量。
+            kwargs.setdefault("stream_options", {"include_usage": True})
         if self.is_ollama() and "num_ctx" not in kwargs:
             num_ctx = int(self.token_count(messages) * 1.25) + 8192
             kwargs["num_ctx"] = num_ctx
@@ -1050,7 +1085,7 @@ class Model(ModelSettings):
         kwargs["messages"] = messages
 
         # Are we using github copilot?
-        if "GITHUB_COPILOT_TOKEN" in os.environ:
+        if "GITHUB_COPILOT_TOKEN" in os.environ and not getattr(self, "_native_provider", None):
             if "extra_headers" not in kwargs:
                 kwargs["extra_headers"] = {
                     "Editor-Version": f"aider/{__version__}",
@@ -1059,13 +1094,17 @@ class Model(ModelSettings):
 
             self.github_copilot_token_to_open_ai_key(kwargs["extra_headers"])
 
-        res = litellm.completion(**kwargs)
+        if getattr(self, "_native_provider", None):
+            kwargs.pop("model")
+            res = self._native_provider.create_completion(**kwargs)
+        else:
+            res = litellm.completion(**kwargs)
         return hash_object, res
 
     def simple_send_with_retries(self, messages):
         from aider.exceptions import LiteLLMExceptions
 
-        litellm_ex = LiteLLMExceptions()
+        litellm_ex = LiteLLMExceptions(native=bool(getattr(self, "_native_provider", None)))
         if "deepseek-reasoner" in self.name:
             messages = ensure_alternating_roles(messages)
         retry_delay = 0.125

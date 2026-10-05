@@ -232,8 +232,8 @@ def get_parser(default_config_files, git_root):
     group.add_argument(
         "--cache-prompts",
         action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Enable caching of prompts (default: False)",
+        default=True,
+        help="Enable caching of prompts (default: True)",
     )
     group.add_argument(
         "--cache-keepalive-pings",

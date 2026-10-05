@@ -111,6 +111,11 @@ class Commands:
 
         raise SwitchCoder(main_model=model, edit_format=new_edit_format)
 
+    def cmd_cache(self, args):
+        "Show session prompt cache statistics"
+        self.io.tool_output(self.coder.cache_optimizer.format_stats(verbose=args.strip() == "verbose"))
+
+
     def cmd_editor_model(self, args):
         "Switch the Editor Model to a new LLM"
 
@@ -119,6 +124,7 @@ class Commands:
             self.coder.main_model.name,
             editor_model=model_name,
             weak_model=self.coder.main_model.weak_model.name,
+            native_config=getattr(self.coder.main_model, "_native_config", None),
         )
         models.sanity_check_models(self.io, model)
         raise SwitchCoder(main_model=model)
@@ -131,6 +137,7 @@ class Commands:
             self.coder.main_model.name,
             editor_model=self.coder.main_model.editor_model.name,
             weak_model=model_name,
+            native_config=getattr(self.coder.main_model, "_native_config", None),
         )
         models.sanity_check_models(self.io, model)
         raise SwitchCoder(main_model=model)

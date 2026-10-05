@@ -61,8 +61,25 @@ class LiteLLMExceptions:
     exceptions = dict()
     exception_info = {exi.name: exi for exi in EXCEPTIONS}
 
-    def __init__(self):
-        self._load()
+    def __init__(self, native=False):
+        self.native = native
+        if native:
+            import openai
+            import anthropic
+            from aider.providers.base import ProviderError
+
+            self.exceptions = {}
+            for sdk in (openai, anthropic):
+                for name in ("APIConnectionError", "APITimeoutError", "AuthenticationError",
+                             "BadRequestError", "NotFoundError", "PermissionDeniedError",
+                             "RateLimitError", "InternalServerError", "APIStatusError"):
+                    error = getattr(sdk, name, None)
+                    if error:
+                        info = self.exception_info.get(name, ExInfo(name, name == "APITimeoutError", None))
+                        self.exceptions[error] = info
+            self.exceptions[ProviderError] = ExInfo("ProviderError", False, None)
+        else:
+            self._load()
 
     def _load(self, strict=False):
         import litellm
@@ -84,6 +101,10 @@ class LiteLLMExceptions:
 
     def get_ex_info(self, ex):
         """Return the ExInfo for a given exception instance"""
+        if self.native:
+            if any(marker in str(ex).lower() for marker in ("context_length_exceeded", "prompt is too long")):
+                return self.exception_info["ContextWindowExceededError"]
+            return self.exceptions.get(type(ex), ExInfo(type(ex).__name__, False, None))
         import litellm
 
         if ex.__class__ is litellm.APIConnectionError:
