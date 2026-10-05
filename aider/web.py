@@ -34,6 +34,38 @@ def _as_bool(value, default=False):
     return bool(value)
 
 
+def _responses_test_result(text):
+    """兼容普通 JSON 和网关强制返回的 Responses SSE。"""
+    try:
+        data = json.loads(text)
+    except ValueError:
+        data = None
+    if isinstance(data, dict):
+        if data.get("error"):
+            raise ValueError(str(data["error"]))
+        return bool(data.get("id") and
+                    (isinstance(data.get("output"), list) or isinstance(data.get("output_text"), str)))
+    valid = False
+    for line in text.splitlines():
+        if not line.strip().startswith("data:"):
+            continue
+        try:
+            event = json.loads(line.strip()[5:].strip())
+        except ValueError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        response = event.get("response")
+        response = response if isinstance(response, dict) else {}
+        if event.get("type") in ("error", "response.error", "response.failed") or response.get("error"):
+            raise ValueError(str(event.get("error") or response.get("error") or "Responses 流式请求失败"))
+        if event.get("type") == "response.completed":
+            valid = True
+        elif event.get("type") == "response.created" and response.get("id"):
+            valid = True
+    return valid
+
+
 def _safe_provider(provider):
     result = {k: v for k, v in provider.items() if k != "api_key"}
     result["has_api_key_env"] = bool(provider.get("api_key_env"))
@@ -157,16 +189,25 @@ class WebStore:
             payload.update(messages=[{"role": "user", "content": "Reply with OK."}], max_tokens=64)
         elif protocol == "openai-responses":
             headers["Authorization"] = "Bearer " + (key or "")
-            payload.update(input="Reply with OK.", max_output_tokens=64)
+            # 参考 ComeCode：部分 Codex 网关要求消息列表、input_text 和流式请求。
+            payload.update(input=[{"role": "user", "content": [
+                {"type": "input_text", "text": "Reply with OK."}]}],
+                stream=True, max_output_tokens=64)
         else:
             headers["Authorization"] = "Bearer " + (key or "")
             payload.update(messages=[{"role": "user", "content": "Reply with OK."}], max_tokens=64)
         started = time.monotonic()
         try:
             with urlopen(Request(url, data=_json_bytes(payload), headers=headers), timeout=30) as response:
-                data = json.load(response)
-            if data.get("error"):
-                raise ValueError(str(data["error"]))
+                text = response.read().decode("utf-8", "replace")
+            if protocol == "openai-responses":
+                if not _responses_test_result(text):
+                    raise ValueError("服务未返回有效的 Responses 响应，请检查协议和接口地址")
+                data = True
+            else:
+                data = json.loads(text)
+                if data.get("error"):
+                    raise ValueError(str(data["error"]))
             return {"ok": True, "elapsed_ms": round((time.monotonic() - started) * 1000),
                     "protocol": protocol, "model": provider["model"], "has_response": bool(data)}
         except Exception as error:
