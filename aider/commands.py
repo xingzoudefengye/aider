@@ -7,6 +7,7 @@ import tempfile
 from collections import OrderedDict
 from os.path import expanduser
 from pathlib import Path
+from types import SimpleNamespace
 
 import pyperclip
 from PIL import Image, ImageGrab
@@ -88,16 +89,46 @@ class Commands:
         "Switch the Main Model to a new LLM"
 
         model_name = args.strip()
+        selected_provider = None
         if not model_name:
-            announcements = "\n".join(self.coder.get_announcements())
-            self.io.tool_output(announcements)
-            return
+            from aider.onboarding import apply_web_model, load_web_models
+
+            try:
+                providers = load_web_models(self.coder.root)
+                if not providers:
+                    self.io.tool_error("没有可选模型，请先运行 aider admin 添加并启用模型")
+                    return
+                # 优先显示当前模型；索引区分不同供应商下的同名模型。
+                current_id = getattr(self.coder.main_model, "_web_provider_id", None)
+                providers.sort(key=lambda p: p.get("id") != current_id if current_id else
+                               not self.coder.main_model.name.endswith("/" + p.get("model", "")))
+                choices = [(index, f"{p.get('name') or '供应商'} / {p['model']}"
+                            + (" · 当前" if p.get("id") == current_id else ""))
+                           for index, p in enumerate(providers)]
+                selected = self.io.select_model(choices)
+                if selected is None:
+                    return
+                selected_provider = providers[selected]
+                config = SimpleNamespace()
+                apply_web_model(config, selected_provider)
+                model_name = config.model
+            except (OSError, ValueError, KeyError) as error:
+                self.io.tool_error(f"无法选择模型：{error}")
+                return
 
         model = models.Model(
             model_name,
-            editor_model=self.coder.main_model.editor_model.name,
-            weak_model=self.coder.main_model.weak_model.name,
+            editor_model=model_name if selected_provider else self.coder.main_model.editor_model.name,
+            weak_model=model_name if selected_provider else self.coder.main_model.weak_model.name,
+            native_config=config._native_model_config if selected_provider else None,
         )
+        if selected_provider:
+            model.configure_web_settings(config._web_model_options)
+            model._web_provider_id = selected_provider.get("id")
+            # 请求固定使用所选连接，避免同协议其他模型改变环境变量后串供应商。
+            for related in (model, model.weak_model, model.editor_model):
+                related.extra_params = dict(related.extra_params or {})
+                related.extra_params.update(config._web_model_connection)
         models.sanity_check_models(self.io, model)
 
         # Check if the current edit format is the default for the old model

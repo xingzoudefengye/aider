@@ -263,6 +263,7 @@ class InputOutput:
         root=".",
         notifications=False,
         notifications_command=None,
+        theme_mode="dark",
     ):
         self.placeholder = None
         self.interrupted = False
@@ -366,6 +367,10 @@ class InputOutput:
                 self.tool_output("Detected dumb terminal, disabling fancy input and pretty output.")
 
         self.file_watcher = file_watcher
+        from aider.core.themes import get_theme
+
+        self.theme_mode = theme_mode
+        self.console.push_theme(get_theme(theme_mode))
         self.root = root
 
         # Validate color settings after console is initialized
@@ -519,6 +524,47 @@ class InputOutput:
             self.placeholder = self.prompt_session.app.current_buffer.text
             self.interrupted = True
             self.prompt_session.app.exit()
+
+    def select_model(self, choices):
+        """用独立列表处理方向键，避免选择模型时触发输入历史。"""
+        from prompt_toolkit.application import Application
+        from prompt_toolkit.layout import HSplit, Layout
+        from prompt_toolkit.layout.dimension import Dimension
+        from prompt_toolkit.widgets import Label, RadioList
+        from prompt_toolkit.styles import Style
+        from aider.core.themes import DARK_THEME_TOKENS, LIGHT_THEME_TOKENS
+
+        if not self.prompt_session:
+            self.tool_error("当前终端不支持交互选择，请使用 /model 模型名称")
+            return None
+        listing = RadioList(choices, select_on_focus=True)
+        tokens = (LIGHT_THEME_TOKENS if getattr(self, "theme_mode", "dark") == "light"
+                  else DARK_THEME_TOKENS)
+        listing.window.height = Dimension(min=1, max=8)
+        bindings = KeyBindings()
+
+        @bindings.add("enter", eager=True)
+        def accept(event):
+            event.app.exit(result=listing.current_value)
+
+        @bindings.add("escape", eager=True)
+        @bindings.add("c-c", eager=True)
+        def cancel(event):
+            event.app.exit(result=None)
+
+        app = Application(
+            layout=Layout(HSplit([
+                Label("选择模型 · ↑↓ 选择 · Enter 确认 · Esc 取消"), listing,
+            ]), focused_element=listing),
+            key_bindings=bindings,
+            input=self.prompt_session.app.input,
+            output=self.prompt_session.app.output,
+            full_screen=False,
+            erase_when_done=True,
+            style=Style.from_dict({"radio-selected": f"bold {tokens.primary}",
+                                   "radio-checked": tokens.success}),
+        )
+        return app.run()
 
     def get_input(
         self,
@@ -1017,8 +1063,9 @@ class InputOutput:
             code_theme=self.code_theme,
             inline_code_lexer="text",
         )
-        mdStream = MarkdownStream(mdargs=mdargs)
+        mdStream = MarkdownStream(mdargs=mdargs, console=self.console, theme_mode=self.theme_mode)
         return mdStream
+
 
     def assistant_output(self, message, pretty=None):
         if not message:

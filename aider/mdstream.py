@@ -102,13 +102,15 @@ class MarkdownStream:
     min_delay = 1.0 / 20  # Minimum time between updates (20fps)
     live_window = 6  # Number of lines to keep visible at bottom during streaming
 
-    def __init__(self, mdargs=None):
+    def __init__(self, mdargs=None, console=None, theme_mode="dark"):
         """Initialize the markdown stream.
 
         Args:
             mdargs (dict, optional): Additional arguments to pass to rich Markdown renderer
         """
         self.printed = []  # Stores lines that have already been printed
+        self.console = console
+        self.theme_mode = theme_mode
 
         if mdargs:
             self.mdargs = mdargs
@@ -130,7 +132,9 @@ class MarkdownStream:
         """
         # Render the markdown to a string buffer
         string_io = io.StringIO()
-        console = Console(file=string_io, force_terminal=True)
+        from aider.core.themes import get_theme
+
+        console = Console(file=string_io, force_terminal=True, theme=get_theme(self.theme_mode))
         markdown = NoInsetMarkdown(text, **self.mdargs)
         console.print(markdown)
         output = string_io.getvalue()
@@ -165,7 +169,7 @@ class MarkdownStream:
         """
         # On the first call, stop the spinner and start the Live renderer
         if not getattr(self, "_live_started", False):
-            self.live = Live(Text(""), refresh_per_second=1.0 / self.min_delay)
+            self.live = Live(Text(""), console=self.console, refresh_per_second=1.0 / self.min_delay)
             self.live.start()
             self._live_started = True
 

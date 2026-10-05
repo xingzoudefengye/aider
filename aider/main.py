@@ -535,19 +535,19 @@ def main(argv=None, input=None, output=None, force_git_root=None, return_coder=F
     if args.timeout:
         models.request_timeout = args.timeout
 
-    if args.dark_mode:
-        args.user_input_color = "#32FF32"
-        args.tool_error_color = "#FF3333"
-        args.tool_warning_color = "#FFFF00"
-        args.assistant_output_color = "#00FFFF"
-        args.code_theme = "monokai"
+    from aider.core.themes import DARK_THEME_TOKENS, LIGHT_THEME_TOKENS
 
-    if args.light_mode:
-        args.user_input_color = "green"
-        args.tool_error_color = "red"
-        args.tool_warning_color = "#FFA500"
-        args.assistant_output_color = "blue"
-        args.code_theme = "default"
+    tokens = LIGHT_THEME_TOKENS if args.light_mode else DARK_THEME_TOKENS
+    theme_colors = {"user_input_color": tokens.primary, "tool_output_color": tokens.text,
+                    "tool_error_color": tokens.error, "tool_warning_color": tokens.warning,
+                    "assistant_output_color": tokens.text,
+                    "completion_menu_color": tokens.text,
+                    "completion_menu_bg_color": tokens.background_panel,
+                    "completion_menu_current_color": tokens.text_bright,
+                    "completion_menu_current_bg_color": tokens.background_element}
+    for name, color in theme_colors.items():
+        if getattr(args, name) == parser.get_default(name):
+            setattr(args, name, color)
 
     if return_coder and args.yes_always is None:
         args.yes_always = True
@@ -572,6 +572,7 @@ def main(argv=None, input=None, output=None, force_git_root=None, return_coder=F
             completion_menu_current_bg_color=args.completion_menu_current_bg_color,
             assistant_output_color=args.assistant_output_color,
             code_theme=args.code_theme,
+            theme_mode="light" if args.light_mode else "dark",
             dry_run=args.dry_run,
             encoding=args.encoding,
             line_endings=args.line_endings,
