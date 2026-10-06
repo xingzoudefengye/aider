@@ -34,6 +34,26 @@ class SwitchCoder(Exception):
         self.placeholder = placeholder
 
 
+# Shift+Tab 循环切换的聊天模式顺序（沿用业内通用叫法，参考 Claude Code / ComeCode）。
+SWITCHABLE_CHAT_MODES = ("ask", "plan", "edit", "auto")
+
+# 模式名 -> (Aider 编辑格式, 中文名, 一句话说明)，用于状态提示和 /chat-mode 列表。
+CHAT_MODES = {
+    "ask": ("ask", "问答", "只回答问题，不修改任何文件"),
+    "plan": ("architect", "计划", "先用计划模型规划，再由编辑器落地改动"),
+    "edit": ("code", "编辑", "直接按当前模型的最佳编辑格式修改代码"),
+    "context": ("context", "上下文", "自动识别需要修改的文件"),
+    "auto": ("architect", "自动", "自动确认所有交互，直接规划并落地改动"),
+}
+
+# 兼容 Aider 原生叫法：architect/code 仍可输入，内部归一到 plan/edit。
+CHAT_MODE_ALIASES = {
+    "architect": "plan",
+    "code": "edit",
+    "edits": "edit",
+}
+
+
 class Commands:
     voice = None
     scraper = None
@@ -210,12 +230,50 @@ class Commands:
         models.sanity_check_models(self.io, model)
         raise SwitchCoder(main_model=model)
 
+    def current_chat_mode(self):
+        """把当前 coder 归一化成 Shift+Tab 循环里的模式名（业内叫法）。"""
+        if getattr(self.io, "_auto_mode", False):
+            return "auto"
+        edit_format = getattr(self.coder, "edit_format", None)
+        if edit_format == "architect":
+            return "plan"
+        if edit_format in ("ask", "context"):
+            return edit_format
+        # 其余编辑格式统一归到“编辑（edit）”模式。
+        return "edit"
+
+    def current_chat_mode_label(self):
+        """当前模式的中文名与标识，用于命令面板和状态提示。"""
+        mode = self.current_chat_mode()
+        label = CHAT_MODES.get(mode, (None, mode, ""))[1]
+        return f"{label}（{mode}）"
+
+    def next_chat_mode(self):
+        """返回 Shift+Tab 应该切换到的下一个模式名。"""
+        modes = list(SWITCHABLE_CHAT_MODES)
+        current = self.current_chat_mode()
+        index = modes.index(current) if current in modes else -1
+        return modes[(index + 1) % len(modes)]
+
+    def _set_auto_mode(self, enabled):
+        """自动模式把 io 的确认行为切成全自动，退出时恢复用户原设置。"""
+        if enabled:
+            if not getattr(self.io, "_auto_mode", False):
+                self.io._auto_mode = True
+                self.io._auto_mode_prev_yes = self.io.yes
+            self.io.yes = True
+        elif getattr(self.io, "_auto_mode", False):
+            self.io.yes = self.io._auto_mode_prev_yes
+            self.io._auto_mode = False
+
     def cmd_chat_mode(self, args):
         "Switch to a new chat mode"
 
         from aider import coders
 
-        ef = args.strip()
+        ef = args.strip().lower()
+        # 兼容 Aider 原生叫法：architect -> plan，code/edits -> edit
+        ef = CHAT_MODE_ALIASES.get(ef, ef)
         valid_formats = OrderedDict(
             sorted(
                 (
@@ -229,20 +287,12 @@ class Commands:
 
         show_formats = OrderedDict(
             [
-                ("help", "Get help about using aider (usage, config, troubleshoot)."),
-                ("ask", "Ask questions about your code without making any changes."),
-                ("code", "Ask for changes to your code (using the best edit format)."),
-                (
-                    "architect",
-                    (
-                        "Work with an architect model to design code changes, and an editor to make"
-                        " them."
-                    ),
-                ),
-                (
-                    "context",
-                    "Automatically identify which files will need to be edited.",
-                ),
+                ("plan", "计划模式：先用计划模型规划，再由编辑器落地改动。"),
+                ("edit", "编辑模式：直接按当前模型的最佳编辑格式修改代码。"),
+                ("ask", "问答模式：只回答问题，不修改任何文件。"),
+                ("context", "上下文模式：自动识别需要修改的文件。"),
+                ("auto", "自动模式：自动确认所有交互，直接规划并落地改动。"),
+                ("help", "获取 Aider 使用帮助（用法、配置、排错）。"),
             ]
         )
 
@@ -258,19 +308,34 @@ class Commands:
 
             self.io.tool_output("\nOr a valid edit format:\n")
             for format, description in valid_formats.items():
-                if format not in show_formats:
+                # 跳过已列出的模式和只作为别名的 architect 等。
+                if format not in show_formats and format not in CHAT_MODE_ALIASES:
                     self.io.tool_output(f"- {format:<{max_format_length}} : {description}")
 
             return
 
         summarize_from_coder = True
-        edit_format = ef
 
-        if ef == "code":
-            edit_format = self.coder.main_model.edit_format
-            summarize_from_coder = False
-        elif ef == "ask":
-            summarize_from_coder = False
+        if ef in CHAT_MODES:
+            edit_format, label, desc = CHAT_MODES[ef]
+            if ef == "edit":
+                # 编辑模式沿用当前模型的最佳编辑格式。
+                edit_format = self.coder.main_model.edit_format
+                summarize_from_coder = False
+            elif ef == "ask":
+                summarize_from_coder = False
+            elif ef == "auto":
+                # 自动模式沿用计划（architect）流程，但自动确认所有交互。
+                edit_format = "architect"
+
+            # 只有 auto 打开全自动确认，切到别的模式立即恢复。
+            self._set_auto_mode(ef == "auto")
+            self.io.tool_output(f"已切换到{label}模式（{ef}）· {desc}")
+        else:
+            # 其余为 Aider 原生编辑格式，例如 diff / whole / udiff。
+            edit_format = ef
+            self._set_auto_mode(False)
+            self.io.tool_output(f"已切换到 {ef} 编辑格式")
 
         raise SwitchCoder(
             edit_format=edit_format,

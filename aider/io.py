@@ -605,6 +605,8 @@ class InputOutput:
                 description = (method.__doc__ or "").strip().split("\n")[0]
                 if name == "/model":
                     description = f"显示或切换当前会话模型 · 当前: {commands.coder.main_model.name}"
+                if name == "/chat-mode":
+                    description = f"切换聊天模式（Shift+Tab 循环）· 当前: {commands.current_chat_mode_label()}"
                 style = "class:completion-menu.completion.current" if index == selection["index"] else ""
                 rows.extend([(style, "› " if index == selection["index"] else "  "),
                              (style, name + "  "), ("", description + "\n")])
@@ -746,6 +748,18 @@ class InputOutput:
             else:
                 # In normal mode, Alt+Enter adds a newline
                 event.current_buffer.insert_text("\n")
+
+        @kb.add("s-tab", eager=True, filter=~is_searching)
+        def _(event):
+            "Shift+Tab 循环切换聊天模式（参考 ComeCode）"
+            mode = commands.next_chat_mode() if commands else None
+            if not mode:
+                return
+            # 通过提交命令走既有命令通道，避免在按键回调里直接抛 SwitchCoder。
+            buffer = event.current_buffer
+            buffer.text = f"/chat-mode {mode}"
+            buffer.cursor_position = len(buffer.text)
+            buffer.validate_and_handle()
 
         panel = self._command_panel(commands, kb) if self.prompt_session else None
 
