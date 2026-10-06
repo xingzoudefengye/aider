@@ -1,3 +1,25 @@
+## 本分支快速上手
+
+本仓库提供原生三协议接入、Web 模型与会话管理、项目记忆和本地交接压缩。
+完整安装步骤见 **[中文使用指南](docs/使用指南.md)**。
+
+已安装 pipx 的用户，首次安装：
+
+```bash
+pipx install "git+https://github.com/xingzoudefengye/aider.git@main"
+```
+
+然后进入你的项目目录：
+
+```bash
+aider admin
+```
+
+在网页中添加模型、测试连接并设为默认。关闭管理页后运行 `aider` 开始编程，
+会话内用 `/model` 和方向键切换模型；查看历史和复制恢复命令也在 `aider admin` 中完成。
+
+下面保留上游项目介绍。
+
 <p align="center">
     <a href="https://aider.chat/"><img src="https://aider.chat/assets/logo.svg" alt="Aider Logo" width="300"></a>
 </p>
@@ -102,28 +124,19 @@ Work with any LLM via its web chat interface. Aider streamlines copy/pasting cod
 
 ## Getting Started
 
-```bash
-python -m pip install aider-install
-aider-install
+请按本分支的 **[中文使用指南](docs/使用指南.md)** 安装和使用，包含：
 
-# Change directory into your codebase
-cd /to/your/project
+- 安装与更新、命令无法识别时的处理。
+- `aider admin` 配置默认模型，`aider` 启动编程。
+- `/model` 方向键切换模型。
+- 查看历史、编辑标题、复制内容和恢复会话。
 
-# DeepSeek
-aider --model deepseek --api-key deepseek=<key>
-
-# Claude 3.7 Sonnet
-aider --model sonnet --api-key anthropic=<key>
-
-# o3-mini
-aider --model o3-mini --api-key openai=<key>
-```
-
-See the [installation instructions](https://aider.chat/docs/install.html) and [usage documentation](https://aider.chat/docs/usage.html) for more details.
+本分支当前从此 Git 仓库安装，尚未独立发布到 PyPI。
 
 ## More Information
 
 ### Documentation
+- [本分支中文使用指南](docs/使用指南.md)
 - [Installation Guide](https://aider.chat/docs/install.html)
 - [Usage Guide](https://aider.chat/docs/usage.html)
 - [Tutorial Videos](https://aider.chat/docs/usage/tutorials.html)
