@@ -672,6 +672,9 @@ class InputOutput:
             show = self.format_files_for_input(rel_fnames, rel_read_only_fnames)
 
         prompt_prefix = ""
+        if getattr(self, "_auto_mode", False):
+            # 自动模式统一显示 auto，避免与 architect 计划模式混淆。
+            edit_format = "auto"
         if edit_format:
             prompt_prefix += edit_format
         if self.multiline_mode:
