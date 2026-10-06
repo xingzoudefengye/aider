@@ -13,6 +13,9 @@ from aider.models import (
 
 class TestModels(unittest.TestCase):
     def setUp(self):
+        self.env_patch = patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"})
+        self.env_patch.start()
+        self.addCleanup(self.env_patch.stop)
         """Reset MODEL_SETTINGS before each test"""
         from aider.models import MODEL_SETTINGS
 
@@ -215,9 +218,7 @@ class TestModels(unittest.TestCase):
         check_for_dependencies(io, "bedrock/anthropic.claude-3-sonnet-20240229-v1:0")
 
         # Verify check_pip_install_extra was called with correct arguments
-        mock_check_pip.assert_called_once_with(
-            io, "boto3", "AWS Bedrock models require the boto3 package.", ["boto3"]
-        )
+        mock_check_pip.assert_not_called()
 
     @patch("aider.models.check_pip_install_extra")
     def test_check_for_dependencies_vertex_ai(self, mock_check_pip):
@@ -232,12 +233,7 @@ class TestModels(unittest.TestCase):
         check_for_dependencies(io, "vertex_ai/gemini-1.5-pro")
 
         # Verify check_pip_install_extra was called with correct arguments
-        mock_check_pip.assert_called_once_with(
-            io,
-            "google.cloud.aiplatform",
-            "Google Vertex AI models require the google-cloud-aiplatform package.",
-            ["google-cloud-aiplatform"],
-        )
+        mock_check_pip.assert_not_called()
 
     @patch("aider.models.check_pip_install_extra")
     def test_check_for_dependencies_other_model(self, mock_check_pip):
@@ -422,7 +418,7 @@ class TestModels(unittest.TestCase):
             except OSError:
                 pass
 
-    @patch("aider.models.litellm.completion")
+    @patch("aider.providers.openai_chat.OpenAIChatProvider.create_completion")
     @patch.object(Model, "token_count")
     def test_ollama_num_ctx_set_when_missing(self, mock_token_count, mock_completion):
         mock_token_count.return_value = 1000
@@ -435,15 +431,14 @@ class TestModels(unittest.TestCase):
         # Verify num_ctx was calculated and added to call
         expected_ctx = int(1000 * 1.25) + 8192  # 9442
         mock_completion.assert_called_once_with(
-            model=model.name,
             messages=messages,
             stream=False,
             temperature=0,
-            num_ctx=expected_ctx,
+            extra_body={"options": {"num_ctx": expected_ctx}},
             timeout=600,
         )
 
-    @patch("aider.models.litellm.completion")
+    @patch("aider.providers.openai_chat.OpenAIChatProvider.create_completion")
     def test_ollama_uses_existing_num_ctx(self, mock_completion):
         model = Model("ollama/llama3")
         model.extra_params = {"num_ctx": 4096}
@@ -453,15 +448,14 @@ class TestModels(unittest.TestCase):
 
         # Should use provided num_ctx from extra_params
         mock_completion.assert_called_once_with(
-            model=model.name,
             messages=messages,
             stream=False,
             temperature=0,
-            num_ctx=4096,
+            extra_body={"options": {"num_ctx": 4096}},
             timeout=600,
         )
 
-    @patch("aider.models.litellm.completion")
+    @patch("aider.providers.openai_chat.OpenAIChatProvider.create_completion")
     def test_non_ollama_no_num_ctx(self, mock_completion):
         model = Model("gpt-4")
         messages = [{"role": "user", "content": "Hello"}]
@@ -470,7 +464,6 @@ class TestModels(unittest.TestCase):
 
         # Regular models shouldn't get num_ctx
         mock_completion.assert_called_once_with(
-            model=model.name,
             messages=messages,
             stream=False,
             temperature=0,
@@ -485,7 +478,7 @@ class TestModels(unittest.TestCase):
         self.assertEqual(model.use_temperature, True)
 
         # Test use_temperature=False doesn't pass temperature
-        model = Model("github/o1-mini")
+        model = Model("openai/o1-mini")
         self.assertFalse(model.use_temperature)
 
         # Test use_temperature as float value
@@ -493,21 +486,20 @@ class TestModels(unittest.TestCase):
         model.use_temperature = 0.7
         self.assertEqual(model.use_temperature, 0.7)
 
-    @patch("aider.models.litellm.completion")
+    @patch("aider.providers.openai_chat.OpenAIChatProvider.create_completion")
     def test_request_timeout_default(self, mock_completion):
         # Test default timeout is used when not specified in extra_params
         model = Model("gpt-4")
         messages = [{"role": "user", "content": "Hello"}]
         model.send_completion(messages, functions=None, stream=False)
         mock_completion.assert_called_with(
-            model=model.name,
             messages=messages,
             stream=False,
             temperature=0,
             timeout=600,  # Default timeout
         )
 
-    @patch("aider.models.litellm.completion")
+    @patch("aider.providers.openai_chat.OpenAIChatProvider.create_completion")
     def test_request_timeout_from_extra_params(self, mock_completion):
         # Test timeout from extra_params overrides default
         model = Model("gpt-4")
@@ -515,21 +507,19 @@ class TestModels(unittest.TestCase):
         messages = [{"role": "user", "content": "Hello"}]
         model.send_completion(messages, functions=None, stream=False)
         mock_completion.assert_called_with(
-            model=model.name,
             messages=messages,
             stream=False,
             temperature=0,
             timeout=300,  # From extra_params
         )
 
-    @patch("aider.models.litellm.completion")
+    @patch("aider.providers.openai_chat.OpenAIChatProvider.create_completion")
     def test_use_temperature_in_send_completion(self, mock_completion):
         # Test use_temperature=True sends temperature=0
         model = Model("gpt-4")
         messages = [{"role": "user", "content": "Hello"}]
         model.send_completion(messages, functions=None, stream=False)
         mock_completion.assert_called_with(
-            model=model.name,
             messages=messages,
             stream=False,
             temperature=0,
@@ -537,7 +527,7 @@ class TestModels(unittest.TestCase):
         )
 
         # Test use_temperature=False doesn't send temperature
-        model = Model("github/o1-mini")
+        model = Model("openai/o1-mini")
         messages = [{"role": "user", "content": "Hello"}]
         model.send_completion(messages, functions=None, stream=False)
         self.assertNotIn("temperature", mock_completion.call_args.kwargs)
@@ -548,7 +538,6 @@ class TestModels(unittest.TestCase):
         messages = [{"role": "user", "content": "Hello"}]
         model.send_completion(messages, functions=None, stream=False)
         mock_completion.assert_called_with(
-            model=model.name,
             messages=messages,
             stream=False,
             temperature=0.7,

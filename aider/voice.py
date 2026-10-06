@@ -7,7 +7,8 @@ import warnings
 
 from prompt_toolkit.shortcuts import prompt
 
-from aider.llm import litellm
+from openai import OpenAI
+from aider.llm import client_options
 
 from .dump import dump  # noqa: F401
 
@@ -166,7 +167,8 @@ class Voice:
 
         with open(filename, "rb") as fh:
             try:
-                transcript = litellm.transcription(
+                transcript = OpenAI(base_url=os.getenv("OPENAI_API_BASE") or os.getenv("OPENAI_BASE_URL"),
+                                    **client_options()).audio.transcriptions.create(
                     model="whisper-1", file=fh, prompt=history, language=language
                 )
             except Exception as err:

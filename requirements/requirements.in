@@ -15,7 +15,11 @@ beautifulsoup4
 PyYAML
 diff-match-patch
 pypandoc
-litellm
+openai
+tiktoken
+httpx
+python-dotenv
+requests
 filelock
 anthropic
 flake8
@@ -46,7 +50,6 @@ networkx<3.5
 # Uses importlib-metadata
 importlib-metadata<8.0.0
 
-# The proper dependency is litellm[proxy], but it installs
-# mcp which is a pywin32 dependency that fails on linux CI.
+# Web 管理 API 和 JSON 编码。
 fastapi
 orjson

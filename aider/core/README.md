@@ -173,6 +173,20 @@ pytest tests/test_*.py -v
   已注入的交接提示词在下一次交接时更新。
 - 检索是本地关键词匹配，不依赖嵌入服务或额外模型请求；历史记录不表示目标已核验。
 
+## 原生模型接入
+
+- 运行时不再依赖 LiteLLM。主模型、辅助模型、缓存预热使用现有三协议适配器，
+  语音转写直接调用 OpenAI SDK，错误重试基于 SDK 异常和 HTTP 状态。
+- Web 中保存的 URL、Key、协议仍由 Aider 独立管理。环境变量入口支持 OpenAI、
+  Anthropic、DeepSeek、OpenRouter、Groq、Gemini 的 OpenAI 兼容接口、Fireworks、
+  Together、xAI、Mistral、Ollama；`openai/responses/模型名` 显式选择 Responses。
+- Bedrock、Vertex、Azure、GitHub 等专用接入未迁移专用认证，不能再依靠旧前缀使用；
+  请通过 `aider admin` 配置可用的兼容端点。不会自动改用其他供应商的密钥。
+- `resources/model-info.json` 保存从旧依赖 1.82.3 的目录迁移的模型参数快照，
+  价格和能力不是实时数据。用户模型元数据及 Web 配置优先；启动不下载模型目录。
+  旧元数据中的 `litellm_provider` 字段仍兼容，仅作为目录字段，不导入该包。
+- OpenAI 模型使用本地 tiktoken，其余模型使用估算并参考真实用量校准压缩阈值。
+
 ## License
 
 与 Aider 主项目保持一致。

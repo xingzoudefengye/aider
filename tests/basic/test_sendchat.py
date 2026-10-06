@@ -1,8 +1,9 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
-from aider.exceptions import LiteLLMExceptions
-from aider.llm import litellm
+from aider.exceptions import ProviderExceptions
+import openai
+import httpx
 from aider.models import Model
 
 
@@ -12,14 +13,16 @@ class PrintCalled(Exception):
 
 class TestSendChat(unittest.TestCase):
     def setUp(self):
+        self.env_patch = patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"})
+        self.env_patch.start()
+        self.addCleanup(self.env_patch.stop)
         self.mock_messages = [{"role": "user", "content": "Hello"}]
         self.mock_model = "gpt-4"
 
-    def test_litellm_exceptions(self):
-        litellm_ex = LiteLLMExceptions()
-        litellm_ex._load(strict=True)
+    def test_native_exceptions(self):
+        assert ProviderExceptions().exceptions_tuple()
 
-    @patch("litellm.completion")
+    @patch("aider.providers.openai_chat.OpenAIChatProvider.create_completion")
     @patch("builtins.print")
     def test_simple_send_with_retries_rate_limit_error(self, mock_print, mock_completion):
         mock = MagicMock()
@@ -27,11 +30,10 @@ class TestSendChat(unittest.TestCase):
 
         # Set up the mock to raise
         mock_completion.side_effect = [
-            litellm.RateLimitError(
+            openai.RateLimitError(
                 "rate limit exceeded",
-                response=mock,
-                llm_provider="llm_provider",
-                model="model",
+                response=httpx.Response(429, request=httpx.Request("POST", "http://localhost")),
+                body=None,
             ),
             None,
         ]
@@ -40,7 +42,7 @@ class TestSendChat(unittest.TestCase):
         Model(self.mock_model).simple_send_with_retries(self.mock_messages)
         assert mock_print.call_count == 3
 
-    @patch("litellm.completion")
+    @patch("aider.providers.openai_chat.OpenAIChatProvider.create_completion")
     def test_send_completion_basic(self, mock_completion):
         # Setup mock response
         mock_response = MagicMock()
@@ -54,7 +56,7 @@ class TestSendChat(unittest.TestCase):
         assert response == mock_response
         mock_completion.assert_called_once()
 
-    @patch("litellm.completion")
+    @patch("aider.providers.openai_chat.OpenAIChatProvider.create_completion")
     def test_send_completion_with_functions(self, mock_completion):
         mock_function = {"name": "test_function", "parameters": {"type": "object"}}
 
@@ -67,7 +69,7 @@ class TestSendChat(unittest.TestCase):
         assert "tools" in called_kwargs
         assert called_kwargs["tools"][0]["function"] == mock_function
 
-    @patch("litellm.completion")
+    @patch("aider.providers.openai_chat.OpenAIChatProvider.create_completion")
     def test_simple_send_attribute_error(self, mock_completion):
         # Setup mock to raise AttributeError
         mock_completion.return_value = MagicMock()
@@ -77,15 +79,15 @@ class TestSendChat(unittest.TestCase):
         result = Model(self.mock_model).simple_send_with_retries(self.mock_messages)
         assert result is None
 
-    @patch("litellm.completion")
+    @patch("aider.providers.openai_chat.OpenAIChatProvider.create_completion")
     @patch("builtins.print")
     def test_simple_send_non_retryable_error(self, mock_print, mock_completion):
         # Test with an error that shouldn't trigger retries
         mock = MagicMock()
         mock.status_code = 400
 
-        mock_completion.side_effect = litellm.NotFoundError(
-            message="Invalid request", llm_provider="test_provider", model="test_model"
+        mock_completion.side_effect = openai.NotFoundError(
+            message="Invalid request", response=httpx.Response(404, request=httpx.Request("POST", "http://localhost")), body=None
         )
 
         result = Model(self.mock_model).simple_send_with_retries(self.mock_messages)

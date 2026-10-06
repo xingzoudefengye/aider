@@ -34,11 +34,10 @@ from aider.commands import Commands
 from aider.core.cache_optimizer import CacheOptimizer, extract_cache_stats_from_usage
 from aider.core.context_manager import ContextManager
 from aider.project_memory import load_project_memory, remember_project_turn, retrieve_project_memory
-from aider.exceptions import LiteLLMExceptions
+from aider.exceptions import ProviderExceptions
 from aider.history import ChatSummary
 from aider.io import ConfirmGroup, InputOutput
 from aider.linter import Linter
-from aider.llm import litellm
 from aider.models import RETRY_TIMEOUT
 from aider.reasoning_tags import (
     REASONING_TAG,
@@ -875,7 +874,6 @@ class Coder:
             "max_pdf_size_mb"
         )
 
-        # https://github.com/BerriAI/litellm/pull/6928
         supports_pdfs = supports_pdfs or "claude-3-5-sonnet-20241022" in self.main_model.name
 
         if not (supports_images or supports_pdfs):
@@ -1500,21 +1498,13 @@ class Coder:
                 kwargs["max_tokens"] = 1
 
                 try:
-                    if getattr(self.main_model, "_native_provider", None):
-                        kwargs.pop("api_key", None)
-                        kwargs.pop("api_base", None)
-                        kwargs.pop("reasoning_effort", None)
-                        completion = self.main_model._native_provider.create_completion(
-                            messages=self.cache_warming_chunks.cacheable_messages(),
-                            stream=False, **kwargs,
-                        )
-                    else:
-                        completion = litellm.completion(
-                            model=self.main_model.name,
-                            messages=self.cache_warming_chunks.cacheable_messages(),
-                            stream=False,
-                            **kwargs,
-                        )
+                    kwargs.pop("api_key", None)
+                    kwargs.pop("api_base", None)
+                    kwargs.pop("reasoning_effort", None)
+                    completion = self.main_model.native_provider().create_completion(
+                        messages=self.cache_warming_chunks.cacheable_messages(),
+                        stream=False, **kwargs,
+                    )
                 except Exception as err:
                     self.io.tool_warning(f"Cache warming error: {str(err)}")
                     continue
@@ -1587,7 +1577,7 @@ class Coder:
 
         retry_delay = 0.125
 
-        litellm_ex = LiteLLMExceptions(native=bool(getattr(self.main_model, "_native_provider", None)))
+        provider_ex = ProviderExceptions()
 
         self.usage_report = None
         exhausted = False
@@ -1597,8 +1587,8 @@ class Coder:
                 try:
                     yield from self.send(messages, functions=self.functions)
                     break
-                except litellm_ex.exceptions_tuple() as err:
-                    ex_info = litellm_ex.get_ex_info(err)
+                except provider_ex.exceptions_tuple() as err:
+                    ex_info = provider_ex.get_ex_info(err)
 
                     if ex_info.name == "ContextWindowExceededError":
                         exhausted = True
@@ -1952,8 +1942,8 @@ class Coder:
             # Calculate costs for successful responses
             self.calculate_and_show_tokens_and_cost(messages, completion)
 
-        except LiteLLMExceptions(native=bool(getattr(model, "_native_provider", None))).exceptions_tuple() as err:
-            ex_info = LiteLLMExceptions(native=bool(getattr(model, "_native_provider", None))).get_ex_info(err)
+        except ProviderExceptions().exceptions_tuple() as err:
+            ex_info = ProviderExceptions().get_ex_info(err)
             if ex_info.name == "ContextWindowExceededError":
                 # Still calculate costs for context window errors
                 self.calculate_and_show_tokens_and_cost(messages, completion)
@@ -2198,17 +2188,9 @@ class Coder:
             self.usage_report = tokens_report
             return
 
-        try:
-            # Try and use litellm's built in cost calculator. Seems to work for non-streaming only?
-            cost = (0 if getattr(self.main_model, "_native_provider", None)
-                    else litellm.completion_cost(completion_response=completion))
-        except Exception:
-            cost = 0
-
-        if not cost:
-            cost = self.compute_costs_from_tokens(
-                prompt_tokens, completion_tokens, cache_write_tokens, cache_hit_tokens
-            )
+        cost = self.compute_costs_from_tokens(
+            prompt_tokens, completion_tokens, cache_write_tokens, cache_hit_tokens
+        )
 
         self.total_cost += cost
         self.message_cost += cost

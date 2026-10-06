@@ -3,6 +3,8 @@
 from typing import Any, Dict, List, Optional
 from types import SimpleNamespace
 
+from aider.llm import client_options
+
 from .base import ModelProvider
 
 
@@ -30,6 +32,7 @@ class OpenAIChatProvider(ModelProvider):
             self._client = OpenAI(
                 api_key=self.api_key,
                 base_url=self.api_base,
+                **client_options(),
                 organization=self.organization,
             )
         return self._client
@@ -72,6 +75,14 @@ class OpenAIChatProvider(ModelProvider):
 
         # 合并额外参数
         params.update(kwargs)
+        # 中转和兼容供应商扩展字段放入请求体，不能直接作为 SDK 关键字参数。
+        body = dict(params.get("extra_body") or {})
+        for name in ("include_reasoning", "top_k", "top_a", "min_p", "repetition_penalty",
+                     "transforms", "provider"):
+            if name in params:
+                body[name] = params.pop(name)
+        if body:
+            params["extra_body"] = body
         if stream:
             params.setdefault("stream_options", {"include_usage": True})
         if self.model.startswith(("gpt-5", "gpt-6", "o1", "o3", "o4")):

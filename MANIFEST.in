@@ -1,6 +1,7 @@
 # This needs to sync with aider/help_pats.py
 
 global-exclude .DS_Store
+include aider/resources/model-info.json
 
 recursive-exclude aider/website/examples *
 recursive-exclude aider/website/_posts *

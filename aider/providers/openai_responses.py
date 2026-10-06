@@ -3,6 +3,8 @@
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
+from aider.llm import client_options
+
 from .base import ModelProvider, ProviderError
 
 
@@ -21,7 +23,7 @@ class OpenAIResponsesProvider(ModelProvider):
         if self._client is None:
             from openai import OpenAI
             self._client = OpenAI(api_key=self.api_key, base_url=self.api_base,
-                                  organization=self.organization)
+                                  organization=self.organization, **client_options())
         return self._client
 
     @property

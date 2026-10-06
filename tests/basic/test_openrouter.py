@@ -46,11 +46,9 @@ def test_openrouter_get_model_info_from_cache(monkeypatch, tmp_path):
 
 def test_model_info_manager_uses_openrouter_manager(monkeypatch):
     """
-    ModelInfoManager should delegate to OpenRouterModelManager when litellm
+    ModelInfoManager should delegate to OpenRouterModelManager when the bundled catalog
     provides no data for an OpenRouter-prefixed model.
     """
-    # Ensure litellm path returns no info so that fallback logic triggers
-    monkeypatch.setattr("aider.models.litellm.get_model_info", lambda *a, **k: {})
 
     stub_info = {
         "max_input_tokens": 512,

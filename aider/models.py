@@ -18,7 +18,9 @@ from PIL import Image
 
 from aider import __version__
 from aider.dump import dump  # noqa: F401
-from aider.llm import litellm
+from aider.providers import get_provider
+from aider.providers.environment import resolve_environment
+from aider.providers.base import ProviderError
 from aider.model_options import effective_model_options
 from aider.openrouter import OpenRouterModelManager
 from aider.sendchat import ensure_alternating_roles, sanity_check_messages
@@ -160,16 +162,14 @@ with importlib.resources.open_text("aider.resources", "model-settings.yml") as f
 
 
 class ModelInfoManager:
-    MODEL_INFO_URL = (
-        "https://raw.githubusercontent.com/BerriAI/litellm/main/"
-        "model_prices_and_context_window.json"
-    )
     CACHE_TTL = 60 * 60 * 24  # 24 hours
 
     def __init__(self):
         self.cache_dir = Path.home() / ".aider" / "caches"
         self.cache_file = self.cache_dir / "model_prices_and_context_window.json"
         self.content = None
+        with importlib.resources.open_text("aider.resources", "model-info.json") as resource:
+            self.bundled_metadata = json.load(resource)
         self.local_model_metadata = {}
         self.verify_ssl = True
         self._cache_loaded = False
@@ -201,26 +201,6 @@ class ModelInfoManager:
 
         self._cache_loaded = True
 
-    def _update_cache(self):
-        try:
-            import requests
-
-            # Respect the --no-verify-ssl switch
-            response = requests.get(self.MODEL_INFO_URL, timeout=5, verify=self.verify_ssl)
-            if response.status_code == 200:
-                self.content = response.json()
-                try:
-                    self.cache_file.write_text(json.dumps(self.content, indent=4))
-                except OSError:
-                    pass
-        except Exception as ex:
-            print(str(ex))
-            try:
-                # Save empty dict to cache file on failure
-                self.cache_file.write_text("{}")
-            except OSError:
-                pass
-
     def get_model_from_cached_json_db(self, model):
         data = self.local_model_metadata.get(model)
         if data:
@@ -230,7 +210,11 @@ class ModelInfoManager:
         self._load_cache()
 
         if not self.content:
-            self._update_cache()
+            # 启动不联网拉目录，随包元数据和用户配置即可离线使用。
+            with importlib.resources.open_text("aider.resources", "model-metadata.json") as resource:
+                self.content = {**self.bundled_metadata, **json5.load(resource)}
+        else:
+            self.content = {**self.bundled_metadata, **self.content}
 
         if not self.content:
             return dict()
@@ -242,24 +226,13 @@ class ModelInfoManager:
         pieces = model.split("/")
         if len(pieces) == 2:
             info = self.content.get(pieces[1])
-            if info and info.get("litellm_provider") == pieces[0]:
+            if info and info.get("provider", info.get("litellm_provider")) == pieces[0]:
                 return info
 
         return dict()
 
     def get_model_info(self, model):
         cached_info = self.get_model_from_cached_json_db(model)
-
-        litellm_info = None
-        if litellm._lazy_module or not cached_info:
-            try:
-                litellm_info = litellm.get_model_info(model)
-            except Exception as ex:
-                if "model_prices_and_context_window.json" not in str(ex):
-                    print(str(ex))
-
-        if litellm_info:
-            return litellm_info
 
         if not cached_info and model.startswith("openrouter/"):
             # First try using the locally cached OpenRouter model database
@@ -350,8 +323,6 @@ class Model(ModelSettings):
         )
 
         if native_config:
-            from aider.providers import get_provider
-
             self._native_provider = get_provider(
                 model=native_config["model"], protocol=native_config["protocol"],
                 api_key=native_config["api_key"], api_base=native_config["api_base"],
@@ -372,6 +343,17 @@ class Model(ModelSettings):
         self.max_chat_history_tokens = min(max(max_input_tokens / 16, 1024), 8192)
 
         self.configure_model_settings(model)
+        if not native_config:
+            try:
+                config, _ = resolve_environment(model)
+            except ProviderError:
+                config = None
+            if config:
+                config["api_key"] = (self.extra_params or {}).get("api_key", config["api_key"])
+                config["api_base"] = (self.extra_params or {}).get("api_base", config["api_base"])
+            if config and config["api_key"]:
+                self._native_provider = get_provider(**config)
+                self.cache_control = config["protocol"] == "anthropic"
         if native_config:
             self.configure_web_settings(native_config["options"])
             self.cache_control = native_config["protocol"] == "anthropic"
@@ -685,37 +667,18 @@ class Model(ModelSettings):
         return self.editor_model
 
     def tokenizer(self, text):
-        if getattr(self, "_native_provider", None):
-            import tiktoken
-
-            return tiktoken.get_encoding("cl100k_base").encode(text, disallowed_special=())
-        return litellm.encode(model=self.name, text=text)
-
-    def token_count(self, messages):
-        if getattr(self, "_native_provider", None):
-            # 自定义模型没有官方 tokenizer，使用本地估算；实际用量以供应商返回为准。
-            text = messages if isinstance(messages, str) else json.dumps(messages, ensure_ascii=False)
-            return len(self.tokenizer(text))
-        if type(messages) is list:
-            try:
-                return litellm.token_counter(model=self.name, messages=messages)
-            except Exception as err:
-                print(f"Unable to count tokens: {err}")
-                return 0
-
-        if not self.tokenizer:
-            return
-
-        if type(messages) is str:
-            msgs = messages
-        else:
-            msgs = json.dumps(messages)
+        import tiktoken
 
         try:
-            return len(self.tokenizer(msgs))
-        except Exception as err:
-            print(f"Unable to count tokens: {err}")
-            return 0
+            encoding = tiktoken.encoding_for_model(self.name.rsplit("/", 1)[-1])
+        except KeyError:
+            encoding = tiktoken.get_encoding("cl100k_base")
+        return encoding.encode(text, disallowed_special=())
+
+    def token_count(self, messages):
+        # 非 OpenAI 模型使用本地估算，实际输入用量用于校准压缩阈值。
+        text = messages if isinstance(messages, str) else json.dumps(messages, ensure_ascii=False)
+        return len(self.tokenizer(text))
 
     def token_count_for_image(self, fname):
         """
@@ -758,74 +721,27 @@ class Model(ModelSettings):
             return img.size
 
     def fast_validate_environment(self):
-        """Fast path for common models. Avoids forcing litellm import."""
-
-        model = self.name
-
-        pieces = model.split("/")
-        if len(pieces) > 1:
-            provider = pieces[0]
-        else:
-            provider = None
-
-        keymap = dict(
-            openrouter="OPENROUTER_API_KEY",
-            openai="OPENAI_API_KEY",
-            deepseek="DEEPSEEK_API_KEY",
-            gemini="GEMINI_API_KEY",
-            anthropic="ANTHROPIC_API_KEY",
-            groq="GROQ_API_KEY",
-            fireworks_ai="FIREWORKS_API_KEY",
-        )
-        var = None
-        if model in OPENAI_MODELS:
-            var = "OPENAI_API_KEY"
-        elif model in ANTHROPIC_MODELS:
-            var = "ANTHROPIC_API_KEY"
-        else:
-            var = keymap.get(provider)
-
-        if var and os.environ.get(var):
-            return dict(keys_in_environment=[var], missing_keys=[])
+        return self.validate_environment()
 
     def validate_environment(self):
-        res = self.fast_validate_environment()
-        if res:
-            return res
+        try:
+            config, variable = resolve_environment(self.name)
+        except ProviderError:
+            return dict(keys_in_environment=False, missing_keys=[])
+        if variable and not config["api_key"]:
+            return dict(keys_in_environment=[], missing_keys=[variable])
+        return dict(keys_in_environment=[variable] if variable else [], missing_keys=[])
 
-        # https://github.com/BerriAI/litellm/issues/3190
-
-        model = self.name
-        res = litellm.validate_environment(model)
-
-        # If missing AWS credential keys but AWS_PROFILE is set, consider AWS credentials valid
-        if res["missing_keys"] and any(
-            key in ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"] for key in res["missing_keys"]
-        ):
-            if model.startswith("bedrock/") or model.startswith("us.anthropic."):
-                if os.environ.get("AWS_PROFILE"):
-                    res["missing_keys"] = [
-                        k
-                        for k in res["missing_keys"]
-                        if k not in ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"]
-                    ]
-                    if not res["missing_keys"]:
-                        res["keys_in_environment"] = True
-
-        if res["keys_in_environment"]:
-            return res
-        if res["missing_keys"]:
-            return res
-
-        provider = self.info.get("litellm_provider", "").lower()
-        if provider == "cohere_chat":
-            return validate_variables(["COHERE_API_KEY"])
-        if provider == "gemini":
-            return validate_variables(["GEMINI_API_KEY"])
-        if provider == "groq":
-            return validate_variables(["GROQ_API_KEY"])
-
-        return res
+    def native_provider(self):
+        if self._native_provider is None:
+            config, _ = resolve_environment(self.name)
+            params = self.extra_params or {}
+            config["api_key"] = params.get("api_key", config["api_key"])
+            config["api_base"] = params.get("api_base", config["api_base"])
+            if not config["api_key"]:
+                raise ProviderError("未配置 API Key，请使用 aider admin 配置模型或设置供应商环境变量。")
+            self._native_provider = get_provider(**config)
+        return self._native_provider
 
     def get_repo_map_tokens(self):
         map_tokens = 1024
@@ -839,7 +755,8 @@ class Model(ModelSettings):
     def set_reasoning_effort(self, effort):
         """Set the reasoning effort parameter for models that support it"""
         if effort is not None:
-            if getattr(self, "_web_configured", False):
+            provider = getattr(self, "_native_provider", None)
+            if getattr(self, "_web_configured", False) or (provider and provider.protocol == "openai-responses"):
                 # 交给协议适配层按模型转换为 reasoning 或 thinking 等对应字段。
                 self.extra_params = dict(self.extra_params or {})
                 self.extra_params["reasoning_effort"] = effort
@@ -1064,15 +981,18 @@ class Model(ModelSettings):
             kwargs["tool_choice"] = {"type": "function", "function": {"name": function["name"]}}
         if self.extra_params:
             kwargs.update(self.extra_params)
-        if getattr(self, "_native_provider", None):
-            kwargs.pop("api_key", None)
-            kwargs.pop("api_base", None)
+        provider = self.native_provider()
+        kwargs.pop("api_key", None)
+        kwargs.pop("api_base", None)
         if stream and self.name.startswith("openai/") and not self.name.startswith("openai/responses/"):
             # Chat 流的末尾用量块包含缓存读取信息；Responses 自带完成事件用量。
             kwargs.setdefault("stream_options", {"include_usage": True})
-        if self.is_ollama() and "num_ctx" not in kwargs:
-            num_ctx = int(self.token_count(messages) * 1.25) + 8192
-            kwargs["num_ctx"] = num_ctx
+        if self.is_ollama():
+            # OpenAI 兼容端点通过扩展请求体携带 Ollama 的上下文选项。
+            num_ctx = kwargs.pop("num_ctx", int(self.token_count(messages) * 1.25) + 8192)
+            body = dict(kwargs.get("extra_body") or {})
+            body["options"] = {**body.get("options", {}), "num_ctx": num_ctx}
+            kwargs["extra_body"] = body
         key = json.dumps(kwargs, sort_keys=True).encode()
 
         # dump(kwargs)
@@ -1084,27 +1004,14 @@ class Model(ModelSettings):
             dump(kwargs)
         kwargs["messages"] = messages
 
-        # Are we using github copilot?
-        if "GITHUB_COPILOT_TOKEN" in os.environ and not getattr(self, "_native_provider", None):
-            if "extra_headers" not in kwargs:
-                kwargs["extra_headers"] = {
-                    "Editor-Version": f"aider/{__version__}",
-                    "Copilot-Integration-Id": "vscode-chat",
-                }
-
-            self.github_copilot_token_to_open_ai_key(kwargs["extra_headers"])
-
-        if getattr(self, "_native_provider", None):
-            kwargs.pop("model")
-            res = self._native_provider.create_completion(**kwargs)
-        else:
-            res = litellm.completion(**kwargs)
+        kwargs.pop("model")
+        res = provider.create_completion(**kwargs)
         return hash_object, res
 
     def simple_send_with_retries(self, messages):
-        from aider.exceptions import LiteLLMExceptions
+        from aider.exceptions import ProviderExceptions
 
-        litellm_ex = LiteLLMExceptions(native=bool(getattr(self, "_native_provider", None)))
+        provider_ex = ProviderExceptions()
         if "deepseek-reasoner" in self.name:
             messages = ensure_alternating_roles(messages)
         retry_delay = 0.125
@@ -1128,8 +1035,8 @@ class Model(ModelSettings):
 
                 return remove_reasoning_content(res, self.reasoning_tag)
 
-            except litellm_ex.exceptions_tuple() as err:
-                ex_info = litellm_ex.get_ex_info(err)
+            except provider_ex.exceptions_tuple() as err:
+                ex_info = provider_ex.get_ex_info(err)
                 print(str(err))
                 if ex_info.description:
                     print(ex_info.description)
@@ -1174,7 +1081,7 @@ def register_models(model_settings_fnames):
     return files_loaded
 
 
-def register_litellm_models(model_fnames):
+def register_model_metadata(model_fnames):
     files_loaded = []
     for model_fname in model_fnames:
         if not os.path.exists(model_fname):
@@ -1188,7 +1095,7 @@ def register_litellm_models(model_fnames):
             if not model_def:
                 continue
 
-            # Defer registration with litellm to faster path.
+            # 用户元数据优先于随包目录。
             model_info_manager.local_model_metadata.update(model_def)
         except Exception as e:
             raise Exception(f"Error loading model definition from {model_fname}: {e}")
@@ -1274,34 +1181,24 @@ def check_for_dependencies(io, model_name):
         io: The IO object for user interaction
         model_name: The name of the model to check dependencies for
     """
-    # Check if this is a Bedrock model and ensure boto3 is installed
-    if model_name.startswith("bedrock/"):
-        check_pip_install_extra(
-            io, "boto3", "AWS Bedrock models require the boto3 package.", ["boto3"]
-        )
-
-    # Check if this is a Vertex AI model and ensure google-cloud-aiplatform is installed
-    elif model_name.startswith("vertex_ai/"):
-        check_pip_install_extra(
-            io,
-            "google.cloud.aiplatform",
-            "Google Vertex AI models require the google-cloud-aiplatform package.",
-            ["google-cloud-aiplatform"],
-        )
+    return
 
 
 def fuzzy_match_models(name):
     name = name.lower()
 
     chat_models = set()
-    model_metadata = list(litellm.model_cost.items())
+    model_info_manager._load_cache()
+    model_metadata = list({**model_info_manager.bundled_metadata,
+                           **(model_info_manager.content or {})}.items())
+    model_metadata += [(ms.name, {"mode": "chat", "provider": ms.name.split("/")[0] if "/" in ms.name else "openai"}) for ms in MODEL_SETTINGS]
     model_metadata += list(model_info_manager.local_model_metadata.items())
 
     for orig_model, attrs in model_metadata:
         model = orig_model.lower()
         if attrs.get("mode") != "chat":
             continue
-        provider = attrs.get("litellm_provider", "").lower()
+        provider = attrs.get("provider", attrs.get("litellm_provider", "")).lower()
         if not provider:
             continue
         provider += "/"

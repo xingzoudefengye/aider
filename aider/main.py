@@ -29,7 +29,7 @@ from aider.deprecated import handle_deprecated_model_args
 from aider.format_settings import format_settings, scrub_sensitive_info
 from aider.history import ChatSummary
 from aider.io import InputOutput
-from aider.llm import litellm  # noqa: F401; properly init litellm on launch
+from aider import llm
 from aider.models import ModelSettings
 from aider.onboarding import offer_openrouter_oauth, select_default_model, select_web_default_model
 from aider.repo import ANY_GIT_ERROR, GitRepo
@@ -387,7 +387,7 @@ def load_dotenv_files(git_root, dotenv_fname, encoding="utf-8"):
     return loaded
 
 
-def register_litellm_models(git_root, model_metadata_fname, io, verbose=False):
+def register_model_metadata(git_root, model_metadata_fname, io, verbose=False):
     model_metadata_files = []
 
     # Add the resource file path
@@ -399,7 +399,7 @@ def register_litellm_models(git_root, model_metadata_fname, io, verbose=False):
     )
 
     try:
-        model_metadata_files_loaded = models.register_litellm_models(model_metadata_files)
+        model_metadata_files_loaded = models.register_model_metadata(model_metadata_files)
         if len(model_metadata_files_loaded) > 0 and verbose:
             io.tool_output("Loaded model metadata from:")
             for model_metadata_file in model_metadata_files_loaded:
@@ -522,13 +522,9 @@ def main(argv=None, input=None, output=None, force_git_root=None, return_coder=F
         analytics = Analytics(permanently_disable=True)
         print("Analytics have been permanently disabled.")
 
+    llm.VERIFY_SSL = args.verify_ssl
     if not args.verify_ssl:
-        import httpx
-
         os.environ["SSL_VERIFY"] = ""
-        litellm._load_litellm()
-        litellm._lazy_module.client_session = httpx.Client(verify=False)
-        litellm._lazy_module.aclient_session = httpx.AsyncClient(verify=False)
         # Set verify_ssl on the model_info_manager
         models.model_info_manager.set_verify_ssl(False)
 
@@ -760,7 +756,7 @@ def main(argv=None, input=None, output=None, force_git_root=None, return_coder=F
     is_first_run = is_first_run_of_new_version(io, verbose=args.verbose)
 
     register_models(git_root, args.model_settings_file, io, verbose=args.verbose)
-    register_litellm_models(git_root, args.model_metadata_file, io, verbose=args.verbose)
+    register_model_metadata(git_root, args.model_metadata_file, io, verbose=args.verbose)
 
     if args.list_models:
         models.print_matching_models(io, args.list_models)
@@ -1290,8 +1286,6 @@ def load_slow_imports(swallow=True, native=False):
 
     try:
         import httpx  # noqa: F401
-        if not native:
-            import litellm  # noqa: F401
         import networkx  # noqa: F401
         import numpy  # noqa: F401
     except Exception as e:

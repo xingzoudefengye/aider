@@ -5,6 +5,8 @@ import inspect
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
+from aider.llm import client_options
+
 from .base import ModelProvider, ProviderError
 
 
@@ -34,6 +36,7 @@ class AnthropicMessagesProvider(ModelProvider):
             self._client = Anthropic(
                 api_key=self.api_key,
                 base_url=self.api_base,
+                **client_options(),
             )
         return self._client
 

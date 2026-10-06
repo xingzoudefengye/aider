@@ -579,7 +579,8 @@ End"""
             expected_content = "Final answer after reasoning"
             self.assertEqual(coder.partial_response_content.strip(), expected_content)
 
-    @patch("aider.models.litellm.completion")
+    @patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"})
+    @patch("aider.providers.openai_chat.OpenAIChatProvider.create_completion")
     def test_simple_send_with_retries_removes_reasoning(self, mock_completion):
         """Test that simple_send_with_retries correctly removes reasoning content."""
         model = Model("deepseek-r1")  # This model has reasoning_tag="think"

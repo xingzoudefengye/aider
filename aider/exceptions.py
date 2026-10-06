@@ -57,78 +57,38 @@ EXCEPTIONS = [
 ]
 
 
-class LiteLLMExceptions:
+class ProviderExceptions:
     exceptions = dict()
     exception_info = {exi.name: exi for exi in EXCEPTIONS}
 
-    def __init__(self, native=False):
-        self.native = native
-        if native:
-            import openai
-            import anthropic
-            from aider.providers.base import ProviderError
+    def __init__(self):
+        import openai
+        import anthropic
+        from aider.providers.base import ProviderError
 
-            self.exceptions = {}
-            for sdk in (openai, anthropic):
-                for name in ("APIConnectionError", "APITimeoutError", "AuthenticationError",
-                             "BadRequestError", "NotFoundError", "PermissionDeniedError",
-                             "RateLimitError", "InternalServerError", "APIStatusError"):
-                    error = getattr(sdk, name, None)
-                    if error:
-                        info = self.exception_info.get(name, ExInfo(name, name == "APITimeoutError", None))
-                        self.exceptions[error] = info
-            self.exceptions[ProviderError] = ExInfo("ProviderError", False, None)
-        else:
-            self._load()
-
-    def _load(self, strict=False):
-        import litellm
-
-        for var in dir(litellm):
-            # Filter by BaseException because instances of non-exception classes cannot be caught.
-            # `litellm.ErrorEventError` is an example of a regular class which just happens to end
-            # with `Error`.
-            if var.endswith("Error") and issubclass(getattr(litellm, var), BaseException):
-                if var not in self.exception_info:
-                    raise ValueError(f"{var} is in litellm but not in aider's exceptions list")
-
-        for var in self.exception_info:
-            ex = getattr(litellm, var)
-            self.exceptions[ex] = self.exception_info[var]
+        self.exceptions = {}
+        for sdk in (openai, anthropic):
+            for name in ("APIConnectionError", "APITimeoutError", "AuthenticationError",
+                         "BadRequestError", "NotFoundError", "PermissionDeniedError",
+                         "RateLimitError", "InternalServerError", "APIStatusError",
+                         "APIResponseValidationError"):
+                error = getattr(sdk, name, None)
+                if error:
+                    info = self.exception_info.get(name, ExInfo(name, name == "APITimeoutError", None))
+                    self.exceptions[error] = info
+        self.exceptions[ProviderError] = ExInfo("ProviderError", False, None)
 
     def exceptions_tuple(self):
         return tuple(self.exceptions)
 
     def get_ex_info(self, ex):
         """Return the ExInfo for a given exception instance"""
-        if self.native:
-            if any(marker in str(ex).lower() for marker in ("context_length_exceeded", "prompt is too long")):
-                return self.exception_info["ContextWindowExceededError"]
-            return self.exceptions.get(type(ex), ExInfo(type(ex).__name__, False, None))
-        import litellm
-
-        if ex.__class__ is litellm.APIConnectionError:
-            if "boto3" in str(ex):
-                return ExInfo("APIConnectionError", False, "You need to: pip install boto3")
-            if "OpenrouterException" in str(ex) and "'choices'" in str(ex):
-                return ExInfo(
-                    "APIConnectionError",
-                    True,
-                    (
-                        "OpenRouter or the upstream API provider is down, overloaded or rate"
-                        " limiting your requests."
-                    ),
-                )
-
-        # Check for specific non-retryable APIError cases like insufficient credits
-        if ex.__class__ is litellm.APIError:
-            err_str = str(ex).lower()
-            if "insufficient credits" in err_str and '"code":402' in err_str:
-                return ExInfo(
-                    "APIError",
-                    False,
-                    "Insufficient credits with the API provider. Please add credits.",
-                )
-            # Fall through to default APIError handling if not the specific credits error
-
-        return self.exceptions.get(ex.__class__, ExInfo(None, None, None))
+        if any(marker in str(ex).lower() for marker in ("context_length_exceeded", "prompt is too long")):
+            return self.exception_info["ContextWindowExceededError"]
+        # SDK 基类也可能承载代理返回的非标准状态码，按 HTTP 状态决定是否重试。
+        status = getattr(ex, "status_code", None)
+        if status is not None:
+            retry = status in (408, 409, 429) or status >= 500
+            info = self.exceptions.get(type(ex), ExInfo(type(ex).__name__, retry, None))
+            return ExInfo(info.name, retry, info.description)
+        return self.exceptions.get(type(ex), ExInfo(type(ex).__name__, False, None))
