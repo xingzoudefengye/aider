@@ -8,6 +8,23 @@ class ArchitectCoder(AskCoder):
     gpt_prompts = ArchitectPrompts()
     auto_accept_architect = False
 
+    def get_edits(self, mode="update"):
+        """自动模式下，把计划回复里的 shell 代码块也交给自动执行流程。"""
+        if getattr(self.io, "_auto_mode", False) and self.partial_response_content:
+            try:
+                from .editblock_coder import find_original_update_blocks
+
+                blocks = find_original_update_blocks(
+                    self.partial_response_content,
+                    self.fence,
+                    self.get_inchat_relative_files(),
+                )
+                self.shell_commands += [block[1] for block in blocks if block[0] is None]
+            except ValueError:
+                # 计划里可能有示例代码块，解析失败就跳过，不影响正常流程。
+                pass
+        return []
+
     def reply_completed(self):
         content = self.partial_response_content
 
@@ -24,7 +41,8 @@ class ArchitectCoder(AskCoder):
 
         kwargs["main_model"] = editor_model
         kwargs["edit_format"] = self.main_model.editor_edit_format
-        kwargs["suggest_shell_commands"] = False
+        # 自动模式下让编辑器一并建议并执行 shell 命令（Claude Code 风格的 auto）。
+        kwargs["suggest_shell_commands"] = bool(getattr(self.io, "_auto_mode", False))
         kwargs["map_tokens"] = 0
         kwargs["total_cost"] = self.total_cost
         kwargs["cache_prompts"] = False

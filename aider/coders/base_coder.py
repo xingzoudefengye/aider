@@ -55,6 +55,15 @@ from ..dump import dump  # noqa: F401
 from .chat_chunks import ChatChunks
 
 
+# 自动模式追加到系统提示词：明确告知模型命令会被直接执行，避免它只做建议。
+AUTO_MODE_SHELL_PROMPT = """
+Auto mode is active: every shell command you write in a ```bash block (one per line) is
+executed immediately, without asking the user, and its output is returned to you.
+Proactively use shell commands to verify your work: run tests, linters, builds, and any git
+commands needed to finish the task. Do not tell the user you are unable to run commands.
+"""
+
+
 class UnknownEditFormat(ValueError):
     def __init__(self, edit_format, valid_formats):
         self.edit_format = edit_format
@@ -1269,6 +1278,9 @@ class Coder:
             shell_cmd_prompt = self.gpt_prompts.shell_cmd_prompt.format(platform=platform_text)
             shell_cmd_reminder = self.gpt_prompts.shell_cmd_reminder.format(platform=platform_text)
             rename_with_shell = self.gpt_prompts.rename_with_shell
+            if getattr(self.io, "_auto_mode", False):
+                # 自动模式下命令会被直接执行，提示模型主动用它验证改动。
+                shell_cmd_prompt += AUTO_MODE_SHELL_PROMPT
         else:
             shell_cmd_prompt = self.gpt_prompts.no_shell_cmd_prompt.format(platform=platform_text)
             shell_cmd_reminder = self.gpt_prompts.no_shell_cmd_reminder.format(
@@ -2606,7 +2618,9 @@ class Coder:
             1 for cmd in commands if cmd.strip() and not cmd.strip().startswith("#")
         )
         prompt = "Run shell command?" if command_count == 1 else "Run shell commands?"
-        if not self.io.confirm_ask(
+        # 自动模式（auto）下命令由模型自主执行，不再逐条打断确认。
+        auto_mode = bool(getattr(self.io, "_auto_mode", False))
+        if not auto_mode and not self.io.confirm_ask(
             prompt,
             subject="\n".join(commands),
             explicit_yes_required=True,
