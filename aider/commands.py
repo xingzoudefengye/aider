@@ -1027,9 +1027,9 @@ class Commands:
                         f"Cannot add {matched_file} as it's not part of the repository"
                     )
             else:
-                if is_image_file(matched_file) and not self.coder.main_model.info.get(
+                if is_image_file(matched_file) and self.coder.main_model.info.get(
                     "supports_vision"
-                ):
+                ) is False:
                     self.io.tool_error(
                         f"Cannot add image file {matched_file} as the"
                         f" {self.coder.main_model.name} does not support images."
@@ -1420,23 +1420,45 @@ class Commands:
     def cmd_paste(self, args):
         """Paste image/text from the clipboard into the chat.\
         Optionally provide a name for the image."""
+        content = self.paste_clipboard(args)
+        if content:
+            # 粘贴只准备草稿，用户确认发送后才请求模型。
+            self.io.placeholder = content
+
+    def paste_clipboard(self, args=""):
+        if getattr(self, "_reading_clipboard", False):
+            return None
+        self._reading_clipboard = True
         try:
             # Check for image first
             image = ImageGrab.grabclipboard()
+            if isinstance(image, list):
+                # Windows 复制图片文件时返回文件路径，而不是位图。
+                filename = next((name for name in image if Path(name).suffix.lower()
+                                 in (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff")), None)
+                if filename:
+                    with Image.open(filename) as source:
+                        image = source.copy()
             if isinstance(image, Image.Image):
+                if self.coder.main_model.info.get("supports_vision") is False:
+                    self.io.tool_error("当前模型已关闭图片输入，请用 /model 切换模型或在管理页启用图片支持。")
+                    return None
+                number = getattr(self.io, "clipboard_image_count", 0) + 1
                 if args.strip():
-                    filename = args.strip()
+                    filename = Path(args.strip()).name
                     ext = os.path.splitext(filename)[1].lower()
                     if ext in (".jpg", ".jpeg", ".png"):
                         basename = filename
                     else:
                         basename = f"{filename}.png"
                 else:
-                    basename = "clipboard_image.png"
+                    basename = f"clipboard_image_{number}.png"
 
                 temp_dir = tempfile.mkdtemp()
                 temp_file_path = os.path.join(temp_dir, basename)
                 image_format = "PNG" if basename.lower().endswith(".png") else "JPEG"
+                if image_format == "JPEG" and image.mode not in ("RGB", "L"):
+                    image = image.convert("RGB")
                 image.save(temp_file_path, image_format)
 
                 abs_file_path = Path(temp_file_path).resolve()
@@ -1450,22 +1472,24 @@ class Commands:
                     self.io.tool_output(f"Replaced existing image in the chat: {existing_file}")
 
                 self.coder.abs_fnames.add(str(abs_file_path))
-                self.io.tool_output(f"Added clipboard image to the chat: {abs_file_path}")
+                self.io.clipboard_image_count = number
+                self.io.tool_output(f"图片：已添加 [image #{number}]，继续输入说明后按回车发送。")
                 self.coder.check_added_files()
 
-                return
+                return f"[image #{number}] "
 
             # If not an image, try to get text
             text = pyperclip.paste()
             if text:
-                self.io.tool_output(text)
                 return text
 
-            self.io.tool_error("No image or text content found in clipboard.")
+            self.io.tool_error("剪贴板中没有图片或文字，请先复制截图，再粘贴或输入 /paste。")
             return
 
         except Exception as e:
-            self.io.tool_error(f"Error processing clipboard content: {e}")
+            self.io.tool_error(f"读取剪贴板失败：{e}")
+        finally:
+            self._reading_clipboard = False
 
     def cmd_read_only(self, args):
         "Add files to the chat that are for reference only, or turn added files to read-only"
@@ -1518,7 +1542,7 @@ class Commands:
                 self.io.tool_error(f"Not a file or directory: {abs_path}")
 
     def _add_read_only_file(self, abs_path, original_name):
-        if is_image_file(original_name) and not self.coder.main_model.info.get("supports_vision"):
+        if is_image_file(original_name) and self.coder.main_model.info.get("supports_vision") is False:
             self.io.tool_error(
                 f"Cannot add image file {original_name} as the"
                 f" {self.coder.main_model.name} does not support images."

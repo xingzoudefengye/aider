@@ -677,8 +677,39 @@ class Model(ModelSettings):
 
     def token_count(self, messages):
         # 非 OpenAI 模型使用本地估算，实际输入用量用于校准压缩阈值。
+        image_tokens = 0
+        if isinstance(messages, list):
+            normalized = []
+            for message in messages:
+                message = dict(message)
+                if isinstance(message.get("content"), list):
+                    blocks = []
+                    for block in message["content"]:
+                        if block.get("type") != "image_url":
+                            blocks.append(block)
+                            continue
+                        # Base64 是图片载荷，不能作为正文计算，否则截图会误触发压缩。
+                        image = block["image_url"]
+                        url = image.get("url", "") if isinstance(image, dict) else image
+                        estimate = 1024
+                        if isinstance(image, dict) and image.get("detail") == "low":
+                            estimate = 85
+                        elif url.startswith("data:image/"):
+                            import base64
+                            from io import BytesIO
+
+                            try:
+                                with Image.open(BytesIO(base64.b64decode(url.split(",", 1)[1]))) as source:
+                                    estimate = self._image_tokens(*source.size)
+                            except (ValueError, OSError):
+                                pass
+                        image_tokens += estimate
+                        blocks.append({"type": "text", "text": "[image]"})
+                    message["content"] = blocks
+                normalized.append(message)
+            messages = normalized
         text = messages if isinstance(messages, str) else json.dumps(messages, ensure_ascii=False)
-        return len(self.tokenizer(text))
+        return len(self.tokenizer(text)) + image_tokens
 
     def token_count_for_image(self, fname):
         """
@@ -688,6 +719,10 @@ class Model(ModelSettings):
         :return: The token cost for the image.
         """
         width, height = self.get_image_size(fname)
+        return self._image_tokens(width, height)
+
+    @staticmethod
+    def _image_tokens(width, height):
 
         # If the image is larger than 2048 in any dimension, scale it down to fit within 2048x2048
         max_dimension = max(width, height)

@@ -636,6 +636,19 @@ class InputOutput:
                   title="Commands"), filter=active,
         )
 
+    async def _paste_clipboard(self, event, commands):
+        from prompt_toolkit.application import run_in_terminal
+
+        if not commands or getattr(self, "_clipboard_reading", False):
+            return
+        self._clipboard_reading = True
+        try:
+            content = await run_in_terminal(commands.paste_clipboard, in_executor=True)
+            if content:
+                event.current_buffer.insert_text(content)
+        finally:
+            self._clipboard_reading = False
+
     def get_input(
         self,
         root,
@@ -690,6 +703,18 @@ class InputOutput:
 
         kb = KeyBindings()
 
+        @kb.add("c-v", eager=True)
+        async def paste_clipboard(event):
+            await self._paste_clipboard(event, commands)
+
+        @kb.add(Keys.BracketedPaste, eager=True)
+        async def paste_bracketed(event):
+            if event.data:
+                # 普通文本原样进入草稿；仅空粘贴事件尝试读取图片。
+                event.current_buffer.insert_text(event.data.replace("\r\n", "\n").replace("\r", "\n"))
+            else:
+                await self._paste_clipboard(event, commands)
+
         @kb.add(Keys.ControlZ, filter=Condition(lambda: hasattr(signal, "SIGTSTP")))
         def _(event):
             "Suspend to background with ctrl-z"
@@ -728,6 +753,8 @@ class InputOutput:
         @kb.add("enter", eager=True, filter=~is_searching)
         def _(event):
             "Handle Enter key press"
+            if getattr(self, "_clipboard_reading", False):
+                return
             if self.multiline_mode and not (
                 self.editingmode == EditingMode.VI
                 and event.app.vi_state.input_mode == InputMode.NAVIGATION
@@ -792,6 +819,7 @@ class InputOutput:
                         line = self.prompt_session.prompt(
                             show,
                             default=default,
+                            placeholder="输入需求",
                             completer=completer_instance,
                             reserve_space_for_menu=0,
                             complete_style=CompleteStyle.MULTI_COLUMN,
